@@ -1,7 +1,7 @@
 use std::cell::{Ref, RefCell};
-use std::mem;
 use std::os::raw::*;
 use std::rc::Rc;
+use std::{mem, slice};
 
 use gl::types::*;
 use unwind_aborts::unwind_aborts;
@@ -45,6 +45,28 @@ where
             err_val
         }
     })
+}
+
+fn user_bytes<'a>(size: GLsizei, data: *const c_void) -> &'a [u8] {
+    user_array(size, data as *const _)
+}
+
+fn buffer_value<'a, T>(buffer: GLenum, values: *const T) -> &'a [T] {
+    let size = match buffer {
+        gl::COLOR => 4,
+        gl::DEPTH => 1,
+        gl::STENCIL => 1,
+        _ => 0,
+    };
+    user_array(size, values)
+}
+
+fn user_array<'a, T>(size: GLsizei, data: *const T) -> &'a [T] {
+    unsafe { slice::from_raw_parts(data, size as usize) }
+}
+
+fn webgl_boolean(v: GLboolean) -> webgl::GLboolean {
+    v != 0
 }
 
 pub fn get_proc_address(name: &str) -> *const c_void {
@@ -417,7 +439,8 @@ extern "system" fn buffer_data(
     data: *const c_void,
     usage: GLenum,
 ) -> () {
-    todo!()
+    let data = user_bytes(size as GLsizei, data);
+    with_context(|cx| cx.webgl.buffer_data_2(target, data, usage, 0, 0))
 }
 #[unwind_aborts]
 extern "system" fn buffer_sub_data(
@@ -426,7 +449,11 @@ extern "system" fn buffer_sub_data(
     size: GLsizeiptr,
     data: *const c_void,
 ) -> () {
-    todo!()
+    let data = user_bytes(size as GLsizei, data);
+    with_context(|cx| {
+        cx.webgl
+            .buffer_sub_data_1(target, offset as webgl::GLintptr, data, 0, 0)
+    })
 }
 #[unwind_aborts]
 extern "system" fn check_framebuffer_status(target: GLenum) -> GLenum {
@@ -447,15 +474,18 @@ extern "system" fn clear_bufferfi(
 }
 #[unwind_aborts]
 extern "system" fn clear_bufferfv(buffer: GLenum, drawbuffer: GLint, value: *const GLfloat) -> () {
-    todo!()
+    let value = buffer_value(buffer, value);
+    with_context(|cx| cx.webgl.clear_bufferfv(buffer, drawbuffer, value, 0))
 }
 #[unwind_aborts]
 extern "system" fn clear_bufferiv(buffer: GLenum, drawbuffer: GLint, value: *const GLint) -> () {
-    todo!()
+    let value = buffer_value(buffer, value);
+    with_context(|cx| cx.webgl.clear_bufferiv(buffer, drawbuffer, value, 0))
 }
 #[unwind_aborts]
 extern "system" fn clear_bufferuiv(buffer: GLenum, drawbuffer: GLint, value: *const GLuint) -> () {
-    todo!()
+    let value = buffer_value(buffer, value);
+    with_context(|cx| cx.webgl.clear_bufferuiv(buffer, drawbuffer, value, 0))
 }
 #[unwind_aborts]
 extern "system" fn clear_color(red: GLfloat, green: GLfloat, blue: GLfloat, alpha: GLfloat) -> () {
@@ -480,7 +510,11 @@ extern "system" fn color_mask(
     blue: GLboolean,
     alpha: GLboolean,
 ) -> () {
-    todo!()
+    let red = webgl_boolean(red);
+    let green = webgl_boolean(green);
+    let blue = webgl_boolean(blue);
+    let alpha = webgl_boolean(alpha);
+    with_context(|cx| cx.webgl.color_mask(red, green, blue, alpha))
 }
 #[unwind_aborts]
 extern "system" fn compile_shader(shader: GLuint) -> () {
@@ -497,7 +531,20 @@ extern "system" fn compressed_tex_image2_d(
     image_size: GLsizei,
     data: *const c_void,
 ) -> () {
-    todo!()
+    let data = user_bytes(image_size, data);
+    with_context(|cx| {
+        cx.webgl.compressed_tex_image2_d_1(
+            target,
+            level,
+            internalformat,
+            width,
+            height,
+            border,
+            data,
+            0,
+            0,
+        )
+    })
 }
 #[unwind_aborts]
 extern "system" fn compressed_tex_image3_d(
@@ -511,7 +558,21 @@ extern "system" fn compressed_tex_image3_d(
     image_size: GLsizei,
     data: *const c_void,
 ) -> () {
-    todo!()
+    let data = user_bytes(image_size, data);
+    with_context(|cx| {
+        cx.webgl.compressed_tex_image3_d_1(
+            target,
+            level,
+            internalformat,
+            width,
+            height,
+            depth,
+            border,
+            data,
+            0,
+            0,
+        )
+    })
 }
 #[unwind_aborts]
 extern "system" fn compressed_tex_sub_image2_d(
@@ -525,7 +586,12 @@ extern "system" fn compressed_tex_sub_image2_d(
     image_size: GLsizei,
     data: *const c_void,
 ) -> () {
-    todo!()
+    let data = user_bytes(image_size, data);
+    with_context(|cx| {
+        cx.webgl.compressed_tex_sub_image2_d_1(
+            target, level, xoffset, yoffset, width, height, format, data, 0, 0,
+        )
+    })
 }
 #[unwind_aborts]
 extern "system" fn compressed_tex_sub_image3_d(
@@ -541,7 +607,12 @@ extern "system" fn compressed_tex_sub_image3_d(
     image_size: GLsizei,
     data: *const c_void,
 ) -> () {
-    todo!()
+    let data = user_bytes(image_size, data);
+    with_context(|cx| {
+        cx.webgl.compressed_tex_sub_image3_d_1(
+            target, level, xoffset, yoffset, zoffset, width, height, depth, format, data, 0, 0,
+        )
+    })
 }
 #[unwind_aborts]
 extern "system" fn copy_buffer_sub_data(
@@ -673,7 +744,8 @@ extern "system" fn depth_func(func: GLenum) -> () {
 }
 #[unwind_aborts]
 extern "system" fn depth_mask(flag: GLboolean) -> () {
-    todo!()
+    let flag = webgl_boolean(flag);
+    with_context(|cx| cx.webgl.depth_mask(flag))
 }
 #[unwind_aborts]
 extern "system" fn depth_rangef(n: GLfloat, f: GLfloat) -> () {
@@ -709,7 +781,8 @@ extern "system" fn draw_arrays_instanced(
 }
 #[unwind_aborts]
 extern "system" fn draw_buffers(n: GLsizei, bufs: *const GLenum) -> () {
-    todo!()
+    let bufs = user_array(n, bufs);
+    with_context(|cx| cx.webgl.draw_buffers(bufs))
 }
 #[unwind_aborts]
 extern "system" fn draw_elements(
@@ -1179,7 +1252,8 @@ extern "system" fn invalidate_framebuffer(
     num_attachments: GLsizei,
     attachments: *const GLenum,
 ) -> () {
-    todo!()
+    let attachments = user_array(num_attachments, attachments);
+    with_context(|cx| cx.webgl.invalidate_framebuffer(target, attachments))
 }
 #[unwind_aborts]
 extern "system" fn invalidate_sub_framebuffer(
@@ -1191,7 +1265,11 @@ extern "system" fn invalidate_sub_framebuffer(
     width: GLsizei,
     height: GLsizei,
 ) -> () {
-    todo!()
+    let attachments = user_array(num_attachments, attachments);
+    with_context(|cx| {
+        cx.webgl
+            .invalidate_sub_framebuffer(target, attachments, x, y, width, height)
+    })
 }
 #[unwind_aborts]
 extern "system" fn is_buffer(buffer: GLuint) -> GLboolean {
@@ -1334,7 +1412,8 @@ extern "system" fn resume_transform_feedback() -> () {
 }
 #[unwind_aborts]
 extern "system" fn sample_coverage(value: GLfloat, invert: GLboolean) -> () {
-    todo!()
+    let invert = webgl_boolean(invert);
+    with_context(|cx| cx.webgl.sample_coverage(value, invert))
 }
 #[unwind_aborts]
 extern "system" fn sampler_parameterf(sampler: GLuint, pname: GLenum, param: GLfloat) -> () {
