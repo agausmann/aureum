@@ -1,15 +1,19 @@
-use gl::types::*;
 use std::cell::{Ref, RefCell};
+use std::mem;
 use std::os::raw::*;
-
 use std::rc::Rc;
+
+use gl::types::*;
 use unwind_aborts::unwind_aborts;
+use webgl_stdweb as webgl;
+use webgl_stdweb::GLContext;
 
 pub struct Context {
     inner: Rc<RefCell<ContextInner>>,
 }
 
 struct ContextInner {
+    webgl: GLContext,
     error_code: GLenum,
 }
 
@@ -299,7 +303,7 @@ pub fn get_proc_address(name: &str) -> *const c_void {
 
 #[unwind_aborts]
 extern "system" fn active_texture(texture: GLenum) -> () {
-    todo!()
+    with_context(|cx| cx.webgl.active_texture(texture))
 }
 #[unwind_aborts]
 extern "system" fn attach_shader(program: GLuint, shader: GLuint) -> () {
@@ -311,7 +315,7 @@ extern "system" fn begin_query(target: GLenum, id: GLuint) -> () {
 }
 #[unwind_aborts]
 extern "system" fn begin_transform_feedback(primitive_mode: GLenum) -> () {
-    todo!()
+    with_context(|cx| cx.webgl.begin_transform_feedback(primitive_mode))
 }
 #[unwind_aborts]
 extern "system" fn bind_attrib_location(program: GLuint, index: GLuint, name: *const GLchar) -> () {
@@ -361,19 +365,19 @@ extern "system" fn bind_vertex_array(array: GLuint) -> () {
 }
 #[unwind_aborts]
 extern "system" fn blend_color(red: GLfloat, green: GLfloat, blue: GLfloat, alpha: GLfloat) -> () {
-    todo!()
+    with_context(|cx| cx.webgl.blend_color(red, green, blue, alpha))
 }
 #[unwind_aborts]
 extern "system" fn blend_equation(mode: GLenum) -> () {
-    todo!()
+    with_context(|cx| cx.webgl.blend_equation(mode))
 }
 #[unwind_aborts]
 extern "system" fn blend_equation_separate(mode_rgb: GLenum, mode_alpha: GLenum) -> () {
-    todo!()
+    with_context(|cx| cx.webgl.blend_equation_separate(mode_rgb, mode_alpha))
 }
 #[unwind_aborts]
 extern "system" fn blend_func(sfactor: GLenum, dfactor: GLenum) -> () {
-    todo!()
+    with_context(|cx| cx.webgl.blend_func(sfactor, dfactor))
 }
 #[unwind_aborts]
 extern "system" fn blend_func_separate(
@@ -382,7 +386,10 @@ extern "system" fn blend_func_separate(
     sfactor_alpha: GLenum,
     dfactor_alpha: GLenum,
 ) -> () {
-    todo!()
+    with_context(|cx| {
+        cx.webgl
+            .blend_func_separate(sfactor_rgb, dfactor_rgb, sfactor_alpha, dfactor_alpha)
+    })
 }
 #[unwind_aborts]
 extern "system" fn blit_framebuffer(
@@ -397,7 +404,11 @@ extern "system" fn blit_framebuffer(
     mask: GLbitfield,
     filter: GLenum,
 ) -> () {
-    todo!()
+    with_context(|cx| {
+        cx.webgl.blit_framebuffer(
+            src_x0, src_y0, src_x1, src_y1, dst_x0, dst_y0, dst_x1, dst_y1, mask, filter,
+        )
+    })
 }
 #[unwind_aborts]
 extern "system" fn buffer_data(
@@ -419,11 +430,11 @@ extern "system" fn buffer_sub_data(
 }
 #[unwind_aborts]
 extern "system" fn check_framebuffer_status(target: GLenum) -> GLenum {
-    todo!()
+    with_context(|cx| cx.webgl.check_framebuffer_status(target))
 }
 #[unwind_aborts]
 extern "system" fn clear(mask: GLbitfield) -> () {
-    todo!()
+    with_context(|cx| cx.webgl.clear(mask))
 }
 #[unwind_aborts]
 extern "system" fn clear_bufferfi(
@@ -432,7 +443,7 @@ extern "system" fn clear_bufferfi(
     depth: GLfloat,
     stencil: GLint,
 ) -> () {
-    todo!()
+    with_context(|cx| cx.webgl.clear_bufferfi(buffer, drawbuffer, depth, stencil))
 }
 #[unwind_aborts]
 extern "system" fn clear_bufferfv(buffer: GLenum, drawbuffer: GLint, value: *const GLfloat) -> () {
@@ -448,15 +459,15 @@ extern "system" fn clear_bufferuiv(buffer: GLenum, drawbuffer: GLint, value: *co
 }
 #[unwind_aborts]
 extern "system" fn clear_color(red: GLfloat, green: GLfloat, blue: GLfloat, alpha: GLfloat) -> () {
-    todo!()
+    with_context(|cx| cx.webgl.clear_color(red, green, blue, alpha))
 }
 #[unwind_aborts]
 extern "system" fn clear_depthf(d: GLfloat) -> () {
-    todo!()
+    with_context(|cx| cx.webgl.clear_depth(d))
 }
 #[unwind_aborts]
 extern "system" fn clear_stencil(s: GLint) -> () {
-    todo!()
+    with_context(|cx| cx.webgl.clear_stencil(s))
 }
 #[unwind_aborts]
 extern "system" fn client_wait_sync(sync: GLsync, flags: GLbitfield, timeout: GLuint64) -> GLenum {
@@ -540,7 +551,15 @@ extern "system" fn copy_buffer_sub_data(
     write_offset: GLintptr,
     size: GLsizeiptr,
 ) -> () {
-    todo!()
+    with_context(|cx| {
+        cx.webgl.copy_buffer_sub_data(
+            read_target,
+            write_target,
+            read_offset as webgl::GLintptr,
+            write_offset as webgl::GLintptr,
+            size as webgl::GLintptr,
+        )
+    })
 }
 #[unwind_aborts]
 extern "system" fn copy_tex_image2_d(
@@ -553,7 +572,10 @@ extern "system" fn copy_tex_image2_d(
     height: GLsizei,
     border: GLint,
 ) -> () {
-    todo!()
+    with_context(|cx| {
+        cx.webgl
+            .copy_tex_image2_d(target, level, internalformat, x, y, width, height, border)
+    })
 }
 #[unwind_aborts]
 extern "system" fn copy_tex_sub_image2_d(
@@ -566,7 +588,10 @@ extern "system" fn copy_tex_sub_image2_d(
     width: GLsizei,
     height: GLsizei,
 ) -> () {
-    todo!()
+    with_context(|cx| {
+        cx.webgl
+            .copy_tex_sub_image2_d(target, level, xoffset, yoffset, x, y, width, height)
+    })
 }
 #[unwind_aborts]
 extern "system" fn copy_tex_sub_image3_d(
@@ -580,7 +605,11 @@ extern "system" fn copy_tex_sub_image3_d(
     width: GLsizei,
     height: GLsizei,
 ) -> () {
-    todo!()
+    with_context(|cx| {
+        cx.webgl.copy_tex_sub_image3_d(
+            target, level, xoffset, yoffset, zoffset, x, y, width, height,
+        )
+    })
 }
 #[unwind_aborts]
 extern "system" fn create_program() -> GLuint {
@@ -592,7 +621,7 @@ extern "system" fn create_shader(type_: GLenum) -> GLuint {
 }
 #[unwind_aborts]
 extern "system" fn cull_face(mode: GLenum) -> () {
-    todo!()
+    with_context(|cx| cx.webgl.cull_face(mode))
 }
 #[unwind_aborts]
 extern "system" fn delete_buffers(n: GLsizei, buffers: *const GLuint) -> () {
@@ -640,7 +669,7 @@ extern "system" fn delete_vertex_arrays(n: GLsizei, arrays: *const GLuint) -> ()
 }
 #[unwind_aborts]
 extern "system" fn depth_func(func: GLenum) -> () {
-    todo!()
+    with_context(|cx| cx.webgl.depth_func(func))
 }
 #[unwind_aborts]
 extern "system" fn depth_mask(flag: GLboolean) -> () {
@@ -648,7 +677,7 @@ extern "system" fn depth_mask(flag: GLboolean) -> () {
 }
 #[unwind_aborts]
 extern "system" fn depth_rangef(n: GLfloat, f: GLfloat) -> () {
-    todo!()
+    with_context(|cx| cx.webgl.depth_range(n, f))
 }
 #[unwind_aborts]
 extern "system" fn detach_shader(program: GLuint, shader: GLuint) -> () {
@@ -656,15 +685,15 @@ extern "system" fn detach_shader(program: GLuint, shader: GLuint) -> () {
 }
 #[unwind_aborts]
 extern "system" fn disable(cap: GLenum) -> () {
-    todo!()
+    with_context(|cx| cx.webgl.disable(cap))
 }
 #[unwind_aborts]
 extern "system" fn disable_vertex_attrib_array(index: GLuint) -> () {
-    todo!()
+    with_context(|cx| cx.webgl.disable_vertex_attrib_array(index))
 }
 #[unwind_aborts]
 extern "system" fn draw_arrays(mode: GLenum, first: GLint, count: GLsizei) -> () {
-    todo!()
+    with_context(|cx| cx.webgl.draw_arrays(mode, first, count))
 }
 #[unwind_aborts]
 extern "system" fn draw_arrays_instanced(
@@ -673,7 +702,10 @@ extern "system" fn draw_arrays_instanced(
     count: GLsizei,
     instancecount: GLsizei,
 ) -> () {
-    todo!()
+    with_context(|cx| {
+        cx.webgl
+            .draw_arrays_instanced(mode, first, count, instancecount)
+    })
 }
 #[unwind_aborts]
 extern "system" fn draw_buffers(n: GLsizei, bufs: *const GLenum) -> () {
@@ -711,19 +743,19 @@ extern "system" fn draw_range_elements(
 }
 #[unwind_aborts]
 extern "system" fn enable(cap: GLenum) -> () {
-    todo!()
+    with_context(|cx| cx.webgl.enable(cap))
 }
 #[unwind_aborts]
 extern "system" fn enable_vertex_attrib_array(index: GLuint) -> () {
-    todo!()
+    with_context(|cx| cx.webgl.enable_vertex_attrib_array(index))
 }
 #[unwind_aborts]
 extern "system" fn end_query(target: GLenum) -> () {
-    todo!()
+    with_context(|cx| cx.webgl.end_query(target))
 }
 #[unwind_aborts]
 extern "system" fn end_transform_feedback() -> () {
-    todo!()
+    with_context(|cx| cx.webgl.end_transform_feedback())
 }
 #[unwind_aborts]
 extern "system" fn fence_sync(condition: GLenum, flags: GLbitfield) -> GLsync {
@@ -731,11 +763,11 @@ extern "system" fn fence_sync(condition: GLenum, flags: GLbitfield) -> GLsync {
 }
 #[unwind_aborts]
 extern "system" fn finish() -> () {
-    todo!()
+    with_context(|cx| cx.webgl.finish())
 }
 #[unwind_aborts]
 extern "system" fn flush() -> () {
-    todo!()
+    with_context(|cx| cx.webgl.flush())
 }
 #[unwind_aborts]
 extern "system" fn flush_mapped_buffer_range(
@@ -776,7 +808,7 @@ extern "system" fn framebuffer_texture_layer(
 }
 #[unwind_aborts]
 extern "system" fn front_face(mode: GLenum) -> () {
-    todo!()
+    with_context(|cx| cx.webgl.front_face(mode))
 }
 #[unwind_aborts]
 extern "system" fn gen_buffers(n: GLsizei, buffers: *mut GLuint) -> () {
@@ -812,7 +844,7 @@ extern "system" fn gen_vertex_arrays(n: GLsizei, arrays: *mut GLuint) -> () {
 }
 #[unwind_aborts]
 extern "system" fn generate_mipmap(target: GLenum) -> () {
-    todo!()
+    with_context(|cx| cx.webgl.generate_mipmap(target))
 }
 #[unwind_aborts]
 extern "system" fn get_active_attrib(
@@ -906,7 +938,13 @@ extern "system" fn get_buffer_pointerv(
 }
 #[unwind_aborts]
 extern "system" fn get_error() -> GLenum {
-    todo!()
+    with_context(|cx| {
+        if cx.error_code != gl::NO_ERROR {
+            mem::replace(&mut cx.error_code, gl::NO_ERROR)
+        } else {
+            cx.webgl.get_error()
+        }
+    })
 }
 #[unwind_aborts]
 extern "system" fn get_floatv(pname: GLenum, data: *mut GLfloat) -> () {
@@ -1133,7 +1171,7 @@ extern "system" fn get_vertex_attribiv(index: GLuint, pname: GLenum, params: *mu
 }
 #[unwind_aborts]
 extern "system" fn hint(target: GLenum, mode: GLenum) -> () {
-    todo!()
+    with_context(|cx| cx.webgl.hint(target, mode))
 }
 #[unwind_aborts]
 extern "system" fn invalidate_framebuffer(
@@ -1205,7 +1243,7 @@ extern "system" fn is_vertex_array(array: GLuint) -> GLboolean {
 }
 #[unwind_aborts]
 extern "system" fn line_width(width: GLfloat) -> () {
-    todo!()
+    with_context(|cx| cx.webgl.line_width(width))
 }
 #[unwind_aborts]
 extern "system" fn link_program(program: GLuint) -> () {
@@ -1222,15 +1260,15 @@ extern "system" fn map_buffer_range(
 }
 #[unwind_aborts]
 extern "system" fn pause_transform_feedback() -> () {
-    todo!()
+    with_context(|cx| cx.webgl.pause_transform_feedback())
 }
 #[unwind_aborts]
 extern "system" fn pixel_storei(pname: GLenum, param: GLint) -> () {
-    todo!()
+    with_context(|cx| cx.webgl.pixel_storei(pname, param))
 }
 #[unwind_aborts]
 extern "system" fn polygon_offset(factor: GLfloat, units: GLfloat) -> () {
-    todo!()
+    with_context(|cx| cx.webgl.polygon_offset(factor, units))
 }
 #[unwind_aborts]
 extern "system" fn program_binary(
@@ -1247,7 +1285,7 @@ extern "system" fn program_parameteri(program: GLuint, pname: GLenum, value: GLi
 }
 #[unwind_aborts]
 extern "system" fn read_buffer(src: GLenum) -> () {
-    todo!()
+    with_context(|cx| cx.webgl.read_buffer(src))
 }
 #[unwind_aborts]
 extern "system" fn read_pixels(
@@ -1272,7 +1310,10 @@ extern "system" fn renderbuffer_storage(
     width: GLsizei,
     height: GLsizei,
 ) -> () {
-    todo!()
+    with_context(|cx| {
+        cx.webgl
+            .renderbuffer_storage(target, internalformat, width, height)
+    })
 }
 #[unwind_aborts]
 extern "system" fn renderbuffer_storage_multisample(
@@ -1282,11 +1323,14 @@ extern "system" fn renderbuffer_storage_multisample(
     width: GLsizei,
     height: GLsizei,
 ) -> () {
-    todo!()
+    with_context(|cx| {
+        cx.webgl
+            .renderbuffer_storage_multisample(target, samples, internalformat, width, height)
+    })
 }
 #[unwind_aborts]
 extern "system" fn resume_transform_feedback() -> () {
-    todo!()
+    with_context(|cx| cx.webgl.resume_transform_feedback())
 }
 #[unwind_aborts]
 extern "system" fn sample_coverage(value: GLfloat, invert: GLboolean) -> () {
@@ -1314,7 +1358,7 @@ extern "system" fn sampler_parameteriv(sampler: GLuint, pname: GLenum, param: *c
 }
 #[unwind_aborts]
 extern "system" fn scissor(x: GLint, y: GLint, width: GLsizei, height: GLsizei) -> () {
-    todo!()
+    with_context(|cx| cx.webgl.scissor(x, y, width, height))
 }
 #[unwind_aborts]
 extern "system" fn shader_binary(
@@ -1337,7 +1381,7 @@ extern "system" fn shader_source(
 }
 #[unwind_aborts]
 extern "system" fn stencil_func(func: GLenum, ref_: GLint, mask: GLuint) -> () {
-    todo!()
+    with_context(|cx| cx.webgl.stencil_func(func, ref_, mask))
 }
 #[unwind_aborts]
 extern "system" fn stencil_func_separate(
@@ -1346,19 +1390,19 @@ extern "system" fn stencil_func_separate(
     ref_: GLint,
     mask: GLuint,
 ) -> () {
-    todo!()
+    with_context(|cx| cx.webgl.stencil_func_separate(face, func, ref_, mask))
 }
 #[unwind_aborts]
 extern "system" fn stencil_mask(mask: GLuint) -> () {
-    todo!()
+    with_context(|cx| cx.webgl.stencil_mask(mask))
 }
 #[unwind_aborts]
 extern "system" fn stencil_mask_separate(face: GLenum, mask: GLuint) -> () {
-    todo!()
+    with_context(|cx| cx.webgl.stencil_mask_separate(face, mask))
 }
 #[unwind_aborts]
 extern "system" fn stencil_op(fail: GLenum, zfail: GLenum, zpass: GLenum) -> () {
-    todo!()
+    with_context(|cx| cx.webgl.stencil_op(fail, zfail, zpass))
 }
 #[unwind_aborts]
 extern "system" fn stencil_op_separate(
@@ -1367,7 +1411,7 @@ extern "system" fn stencil_op_separate(
     dpfail: GLenum,
     dppass: GLenum,
 ) -> () {
-    todo!()
+    with_context(|cx| cx.webgl.stencil_op_separate(face, sfail, dpfail, dppass))
 }
 #[unwind_aborts]
 extern "system" fn tex_image2_d(
@@ -1400,7 +1444,7 @@ extern "system" fn tex_image3_d(
 }
 #[unwind_aborts]
 extern "system" fn tex_parameterf(target: GLenum, pname: GLenum, param: GLfloat) -> () {
-    todo!()
+    with_context(|cx| cx.webgl.tex_parameterf(target, pname, param))
 }
 #[unwind_aborts]
 extern "system" fn tex_parameterfv(target: GLenum, pname: GLenum, params: *const GLfloat) -> () {
@@ -1408,7 +1452,7 @@ extern "system" fn tex_parameterfv(target: GLenum, pname: GLenum, params: *const
 }
 #[unwind_aborts]
 extern "system" fn tex_parameteri(target: GLenum, pname: GLenum, param: GLint) -> () {
-    todo!()
+    with_context(|cx| cx.webgl.tex_parameteri(target, pname, param))
 }
 #[unwind_aborts]
 extern "system" fn tex_parameteriv(target: GLenum, pname: GLenum, params: *const GLint) -> () {
@@ -1422,7 +1466,10 @@ extern "system" fn tex_storage2_d(
     width: GLsizei,
     height: GLsizei,
 ) -> () {
-    todo!()
+    with_context(|cx| {
+        cx.webgl
+            .tex_storage2_d(target, levels, internalformat, width, height)
+    })
 }
 #[unwind_aborts]
 extern "system" fn tex_storage3_d(
@@ -1433,7 +1480,10 @@ extern "system" fn tex_storage3_d(
     height: GLsizei,
     depth: GLsizei,
 ) -> () {
-    todo!()
+    with_context(|cx| {
+        cx.webgl
+            .tex_storage3_d(target, levels, internalformat, width, height, depth)
+    })
 }
 #[unwind_aborts]
 extern "system" fn tex_sub_image2_d(
@@ -1685,7 +1735,7 @@ extern "system" fn validate_program(program: GLuint) -> () {
 }
 #[unwind_aborts]
 extern "system" fn vertex_attrib1f(index: GLuint, x: GLfloat) -> () {
-    todo!()
+    with_context(|cx| cx.webgl.vertex_attrib1f(index, x))
 }
 #[unwind_aborts]
 extern "system" fn vertex_attrib1fv(index: GLuint, v: *const GLfloat) -> () {
@@ -1693,7 +1743,7 @@ extern "system" fn vertex_attrib1fv(index: GLuint, v: *const GLfloat) -> () {
 }
 #[unwind_aborts]
 extern "system" fn vertex_attrib2f(index: GLuint, x: GLfloat, y: GLfloat) -> () {
-    todo!()
+    with_context(|cx| cx.webgl.vertex_attrib2f(index, x, y))
 }
 #[unwind_aborts]
 extern "system" fn vertex_attrib2fv(index: GLuint, v: *const GLfloat) -> () {
@@ -1701,7 +1751,7 @@ extern "system" fn vertex_attrib2fv(index: GLuint, v: *const GLfloat) -> () {
 }
 #[unwind_aborts]
 extern "system" fn vertex_attrib3f(index: GLuint, x: GLfloat, y: GLfloat, z: GLfloat) -> () {
-    todo!()
+    with_context(|cx| cx.webgl.vertex_attrib3f(index, x, y, z))
 }
 #[unwind_aborts]
 extern "system" fn vertex_attrib3fv(index: GLuint, v: *const GLfloat) -> () {
@@ -1715,7 +1765,7 @@ extern "system" fn vertex_attrib4f(
     z: GLfloat,
     w: GLfloat,
 ) -> () {
-    todo!()
+    with_context(|cx| cx.webgl.vertex_attrib4f(index, x, y, z, w))
 }
 #[unwind_aborts]
 extern "system" fn vertex_attrib4fv(index: GLuint, v: *const GLfloat) -> () {
@@ -1723,11 +1773,11 @@ extern "system" fn vertex_attrib4fv(index: GLuint, v: *const GLfloat) -> () {
 }
 #[unwind_aborts]
 extern "system" fn vertex_attrib_divisor(index: GLuint, divisor: GLuint) -> () {
-    todo!()
+    with_context(|cx| cx.webgl.vertex_attrib_divisor(index, divisor))
 }
 #[unwind_aborts]
 extern "system" fn vertex_attrib_i4i(index: GLuint, x: GLint, y: GLint, z: GLint, w: GLint) -> () {
-    todo!()
+    with_context(|cx| cx.webgl.vertex_attrib_i4i(index, x, y, z, w))
 }
 #[unwind_aborts]
 extern "system" fn vertex_attrib_i4iv(index: GLuint, v: *const GLint) -> () {
@@ -1741,7 +1791,7 @@ extern "system" fn vertex_attrib_i4ui(
     z: GLuint,
     w: GLuint,
 ) -> () {
-    todo!()
+    with_context(|cx| cx.webgl.vertex_attrib_i4ui(index, x, y, z, w))
 }
 #[unwind_aborts]
 extern "system" fn vertex_attrib_i4uiv(index: GLuint, v: *const GLuint) -> () {
@@ -1770,7 +1820,7 @@ extern "system" fn vertex_attrib_pointer(
 }
 #[unwind_aborts]
 extern "system" fn viewport(x: GLint, y: GLint, width: GLsizei, height: GLsizei) -> () {
-    todo!()
+    with_context(|cx| cx.webgl.viewport(x, y, width, height))
 }
 #[unwind_aborts]
 extern "system" fn wait_sync(sync: GLsync, flags: GLbitfield, timeout: GLuint64) -> () {
