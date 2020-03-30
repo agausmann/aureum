@@ -9,7 +9,8 @@ use unwind_aborts::unwind_aborts;
 use webgl_stdweb as webgl;
 use webgl_stdweb::{
     GLContext, WebGLBuffer, WebGLFramebuffer, WebGLProgram, WebGLQuery, WebGLRenderbuffer,
-    WebGLSampler, WebGLShader, WebGLTexture, WebGLTransformFeedback, WebGLVertexArrayObject,
+    WebGLSampler, WebGLShader, WebGLSync, WebGLTexture, WebGLTransformFeedback,
+    WebGLVertexArrayObject,
 };
 
 pub struct Context {
@@ -25,6 +26,7 @@ struct ContextInner {
     queries: ObjectMap<WebGLQuery>,
     renderbuffers: ObjectMap<WebGLRenderbuffer>,
     samplers: ObjectMap<WebGLSampler>,
+    syncs: ObjectMap<WebGLSync>,
     textures: ObjectMap<WebGLTexture>,
     transform_feedbacks: ObjectMap<WebGLTransformFeedback>,
     vertex_arrays: ObjectMap<WebGLVertexArrayObject>,
@@ -693,7 +695,10 @@ extern "system" fn clear_stencil(s: GLint) -> () {
 
 #[unwind_aborts]
 extern "system" fn client_wait_sync(sync: GLsync, flags: GLbitfield, timeout: GLuint64) -> GLenum {
-    todo!()
+    try_with_context(gl::WAIT_FAILED, |cx| {
+        let sync = cx.syncs.get(sync as GLuint)?;
+        Ok(cx.webgl.client_wait_sync(sync, flags, timeout))
+    })
 }
 
 #[unwind_aborts]
@@ -995,7 +1000,10 @@ extern "system" fn delete_shader(shader: GLuint) -> () {
 
 #[unwind_aborts]
 extern "system" fn delete_sync(sync: GLsync) -> () {
-    todo!()
+    try_with_context((), |cx| {
+        let sync = cx.syncs.remove(sync as GLuint)?;
+        Ok(cx.webgl.delete_sync(sync.as_ref()))
+    })
 }
 
 #[unwind_aborts]
@@ -1148,7 +1156,7 @@ extern "system" fn end_transform_feedback() -> () {
 
 #[unwind_aborts]
 extern "system" fn fence_sync(condition: GLenum, flags: GLbitfield) -> GLsync {
-    todo!()
+    with_context(|cx| cx.syncs.add(cx.webgl.fence_sync(condition, flags)) as GLsync)
 }
 
 #[unwind_aborts]
@@ -2537,5 +2545,8 @@ extern "system" fn viewport(x: GLint, y: GLint, width: GLsizei, height: GLsizei)
 
 #[unwind_aborts]
 extern "system" fn wait_sync(sync: GLsync, flags: GLbitfield, timeout: GLuint64) -> () {
-    todo!()
+    try_with_context((), |cx| {
+        let sync = cx.syncs.get(sync as GLuint)?;
+        Ok(cx.webgl.wait_sync(sync, flags, timeout as webgl::GLint64))
+    })
 }
