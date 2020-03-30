@@ -7,7 +7,10 @@ use std::{mem, slice};
 use gl::types::*;
 use unwind_aborts::unwind_aborts;
 use webgl_stdweb as webgl;
-use webgl_stdweb::{GLContext, WebGLProgram, WebGLShader};
+use webgl_stdweb::{
+    GLContext, WebGLBuffer, WebGLFramebuffer, WebGLProgram, WebGLQuery, WebGLRenderbuffer,
+    WebGLSampler, WebGLShader, WebGLTexture, WebGLTransformFeedback, WebGLVertexArrayObject,
+};
 
 pub struct Context {
     inner: Rc<RefCell<ContextInner>>,
@@ -17,6 +20,14 @@ struct ContextInner {
     webgl: GLContext,
     error_code: GLenum,
     shaders: ObjectMap<ProgramOrShader>,
+    buffers: ObjectMap<WebGLBuffer>,
+    framebuffers: ObjectMap<WebGLFramebuffer>,
+    queries: ObjectMap<WebGLQuery>,
+    renderbuffers: ObjectMap<WebGLRenderbuffer>,
+    samplers: ObjectMap<WebGLSampler>,
+    textures: ObjectMap<WebGLTexture>,
+    transform_feedbacks: ObjectMap<WebGLTransformFeedback>,
+    vertex_arrays: ObjectMap<WebGLVertexArrayObject>,
 }
 
 struct ObjectMap<T> {
@@ -36,6 +47,14 @@ impl<T> ObjectMap<T> {
             .map(Option::as_ref)
             .flatten()
             .ok_or(gl::INVALID_VALUE)
+    }
+
+    fn get_nullable(&self, id: GLuint) -> Result<Option<&T>, GLenum> {
+        if id == 0 {
+            Ok(None)
+        } else {
+            self.get(id).map(Some)
+        }
     }
 
     fn add(&mut self, obj: Option<T>) -> GLuint {
@@ -149,6 +168,10 @@ fn buffer_value<'a, T>(buffer: GLenum, values: *const T) -> &'a [T] {
 
 fn user_array<'a, T>(size: GLsizei, data: *const T) -> &'a [T] {
     unsafe { slice::from_raw_parts(data, size as usize) }
+}
+
+fn user_array_mut<'a, T>(size: GLsizei, data: *mut T) -> &'a mut [T] {
+    unsafe { slice::from_raw_parts_mut(data, size as usize) }
 }
 
 fn webgl_boolean(v: GLboolean) -> webgl::GLboolean {
@@ -433,7 +456,10 @@ extern "system" fn attach_shader(program: GLuint, shader: GLuint) -> () {
 
 #[unwind_aborts]
 extern "system" fn begin_query(target: GLenum, id: GLuint) -> () {
-    todo!()
+    try_with_context((), |cx| {
+        let query = cx.queries.get(id)?;
+        Ok(cx.webgl.begin_query(target, query))
+    })
 }
 
 #[unwind_aborts]
@@ -443,17 +469,27 @@ extern "system" fn begin_transform_feedback(primitive_mode: GLenum) -> () {
 
 #[unwind_aborts]
 extern "system" fn bind_attrib_location(program: GLuint, index: GLuint, name: *const GLchar) -> () {
-    todo!()
+    try_with_context((), |cx| {
+        let program = cx.shaders.get(program)?.as_program()?;
+        let name = user_str(name)?;
+        Ok(cx.webgl.bind_attrib_location(program, index, name))
+    })
 }
 
 #[unwind_aborts]
 extern "system" fn bind_buffer(target: GLenum, buffer: GLuint) -> () {
-    todo!()
+    try_with_context((), |cx| {
+        let buffer = cx.buffers.get_nullable(buffer)?;
+        Ok(cx.webgl.bind_buffer(target, buffer))
+    })
 }
 
 #[unwind_aborts]
 extern "system" fn bind_buffer_base(target: GLenum, index: GLuint, buffer: GLuint) -> () {
-    todo!()
+    try_with_context((), |cx| {
+        let buffer = cx.buffers.get_nullable(buffer)?;
+        Ok(cx.webgl.bind_buffer_base(target, index, buffer))
+    })
 }
 
 #[unwind_aborts]
@@ -464,37 +500,64 @@ extern "system" fn bind_buffer_range(
     offset: GLintptr,
     size: GLsizeiptr,
 ) -> () {
-    todo!()
+    try_with_context((), |cx| {
+        let buffer = cx.buffers.get_nullable(buffer)?;
+        Ok(cx.webgl.bind_buffer_range(
+            target,
+            index,
+            buffer,
+            offset as webgl::GLintptr,
+            size as webgl::GLintptr,
+        ))
+    })
 }
 
 #[unwind_aborts]
 extern "system" fn bind_framebuffer(target: GLenum, framebuffer: GLuint) -> () {
-    todo!()
+    try_with_context((), |cx| {
+        let framebuffer = cx.framebuffers.get_nullable(framebuffer)?;
+        Ok(cx.webgl.bind_framebuffer(target, framebuffer))
+    })
 }
 
 #[unwind_aborts]
 extern "system" fn bind_renderbuffer(target: GLenum, renderbuffer: GLuint) -> () {
-    todo!()
+    try_with_context((), |cx| {
+        let renderbuffer = cx.renderbuffers.get_nullable(renderbuffer)?;
+        Ok(cx.webgl.bind_renderbuffer(target, renderbuffer))
+    })
 }
 
 #[unwind_aborts]
 extern "system" fn bind_sampler(unit: GLuint, sampler: GLuint) -> () {
-    todo!()
+    try_with_context((), |cx| {
+        let sampler = cx.samplers.get_nullable(sampler)?;
+        Ok(cx.webgl.bind_sampler(unit, sampler))
+    })
 }
 
 #[unwind_aborts]
 extern "system" fn bind_texture(target: GLenum, texture: GLuint) -> () {
-    todo!()
+    try_with_context((), |cx| {
+        let texture = cx.textures.get_nullable(texture)?;
+        Ok(cx.webgl.bind_texture(target, texture))
+    })
 }
 
 #[unwind_aborts]
 extern "system" fn bind_transform_feedback(target: GLenum, id: GLuint) -> () {
-    todo!()
+    try_with_context((), |cx| {
+        let tf = cx.transform_feedbacks.get_nullable(id)?;
+        Ok(cx.webgl.bind_transform_feedback(target, tf))
+    })
 }
 
 #[unwind_aborts]
 extern "system" fn bind_vertex_array(array: GLuint) -> () {
-    todo!()
+    try_with_context((), |cx| {
+        let array = cx.vertex_arrays.get_nullable(array)?;
+        Ok(cx.webgl.bind_vertex_array(array))
+    })
 }
 
 #[unwind_aborts]
@@ -848,12 +911,26 @@ extern "system" fn cull_face(mode: GLenum) -> () {
 
 #[unwind_aborts]
 extern "system" fn delete_buffers(n: GLsizei, buffers: *const GLuint) -> () {
-    todo!()
+    let buffers = user_array(n, buffers);
+    with_context(|cx| {
+        for &buffer in buffers {
+            if let Ok(buffer) = cx.buffers.get_nullable(buffer) {
+                cx.webgl.delete_buffer(buffer);
+            }
+        }
+    })
 }
 
 #[unwind_aborts]
 extern "system" fn delete_framebuffers(n: GLsizei, framebuffers: *const GLuint) -> () {
-    todo!()
+    let framebuffers = user_array(n, framebuffers);
+    with_context(|cx| {
+        for &fb in framebuffers {
+            if let Ok(fb) = cx.framebuffers.get_nullable(fb) {
+                cx.webgl.delete_framebuffer(fb);
+            }
+        }
+    })
 }
 
 #[unwind_aborts]
@@ -870,17 +947,38 @@ extern "system" fn delete_program(program: GLuint) -> () {
 
 #[unwind_aborts]
 extern "system" fn delete_queries(n: GLsizei, ids: *const GLuint) -> () {
-    todo!()
+    let ids = user_array(n, ids);
+    with_context(|cx| {
+        for &id in ids {
+            if let Ok(query) = cx.queries.get_nullable(id) {
+                cx.webgl.delete_query(query);
+            }
+        }
+    })
 }
 
 #[unwind_aborts]
 extern "system" fn delete_renderbuffers(n: GLsizei, renderbuffers: *const GLuint) -> () {
-    todo!()
+    let renderbuffers = user_array(n, renderbuffers);
+    with_context(|cx| {
+        for &rb in renderbuffers {
+            if let Ok(rb) = cx.renderbuffers.get_nullable(rb) {
+                cx.webgl.delete_renderbuffer(rb);
+            }
+        }
+    })
 }
 
 #[unwind_aborts]
 extern "system" fn delete_samplers(count: GLsizei, samplers: *const GLuint) -> () {
-    todo!()
+    let samplers = user_array(count, samplers);
+    with_context(|cx| {
+        for &sampler in samplers {
+            if let Ok(sampler) = cx.samplers.get_nullable(sampler) {
+                cx.webgl.delete_sampler(sampler);
+            }
+        }
+    })
 }
 
 #[unwind_aborts]
@@ -902,17 +1000,38 @@ extern "system" fn delete_sync(sync: GLsync) -> () {
 
 #[unwind_aborts]
 extern "system" fn delete_textures(n: GLsizei, textures: *const GLuint) -> () {
-    todo!()
+    let textures = user_array(n, textures);
+    with_context(|cx| {
+        for &texture in textures {
+            if let Ok(texture) = cx.textures.get_nullable(texture) {
+                cx.webgl.delete_texture(texture)
+            }
+        }
+    })
 }
 
 #[unwind_aborts]
 extern "system" fn delete_transform_feedbacks(n: GLsizei, ids: *const GLuint) -> () {
-    todo!()
+    let ids = user_array(n, ids);
+    with_context(|cx| {
+        for &id in ids {
+            if let Ok(tf) = cx.transform_feedbacks.get_nullable(id) {
+                cx.webgl.delete_transform_feedback(tf);
+            }
+        }
+    })
 }
 
 #[unwind_aborts]
 extern "system" fn delete_vertex_arrays(n: GLsizei, arrays: *const GLuint) -> () {
-    todo!()
+    let arrays = user_array(n, arrays);
+    with_context(|cx| {
+        for &va in arrays {
+            if let Ok(va) = cx.vertex_arrays.get_nullable(va) {
+                cx.webgl.delete_vertex_array(va);
+            }
+        }
+    })
 }
 
 #[unwind_aborts]
@@ -1058,7 +1177,12 @@ extern "system" fn framebuffer_renderbuffer(
     renderbuffertarget: GLenum,
     renderbuffer: GLuint,
 ) -> () {
-    todo!()
+    try_with_context((), |cx| {
+        let rb = cx.renderbuffers.get_nullable(renderbuffer)?;
+        Ok(cx
+            .webgl
+            .framebuffer_renderbuffer(target, attachment, renderbuffertarget, rb))
+    })
 }
 
 #[unwind_aborts]
@@ -1069,7 +1193,12 @@ extern "system" fn framebuffer_texture2_d(
     texture: GLuint,
     level: GLint,
 ) -> () {
-    todo!()
+    try_with_context((), |cx| {
+        let texture = cx.textures.get_nullable(texture)?;
+        Ok(cx
+            .webgl
+            .framebuffer_texture2_d(target, attachment, textarget, texture, level))
+    })
 }
 
 #[unwind_aborts]
@@ -1080,7 +1209,12 @@ extern "system" fn framebuffer_texture_layer(
     level: GLint,
     layer: GLint,
 ) -> () {
-    todo!()
+    try_with_context((), |cx| {
+        let texture = cx.textures.get_nullable(texture)?;
+        Ok(cx
+            .webgl
+            .framebuffer_texture_layer(target, attachment, texture, level, layer))
+    })
 }
 
 #[unwind_aborts]
@@ -1090,42 +1224,84 @@ extern "system" fn front_face(mode: GLenum) -> () {
 
 #[unwind_aborts]
 extern "system" fn gen_buffers(n: GLsizei, buffers: *mut GLuint) -> () {
-    todo!()
+    let buffers = user_array_mut(n, buffers);
+    with_context(|cx| {
+        for buffer in buffers {
+            *buffer = cx.buffers.add(cx.webgl.create_buffer());
+        }
+    })
 }
 
 #[unwind_aborts]
 extern "system" fn gen_framebuffers(n: GLsizei, framebuffers: *mut GLuint) -> () {
-    todo!()
+    let framebuffers = user_array_mut(n, framebuffers);
+    with_context(|cx| {
+        for fb in framebuffers {
+            *fb = cx.framebuffers.add(cx.webgl.create_framebuffer());
+        }
+    })
 }
 
 #[unwind_aborts]
 extern "system" fn gen_queries(n: GLsizei, ids: *mut GLuint) -> () {
-    todo!()
+    let ids = user_array_mut(n, ids);
+    with_context(|cx| {
+        for id in ids {
+            *id = cx.queries.add(cx.webgl.create_query());
+        }
+    })
 }
 
 #[unwind_aborts]
 extern "system" fn gen_renderbuffers(n: GLsizei, renderbuffers: *mut GLuint) -> () {
-    todo!()
+    let renderbuffers = user_array_mut(n, renderbuffers);
+    with_context(|cx| {
+        for rb in renderbuffers {
+            *rb = cx.renderbuffers.add(cx.webgl.create_renderbuffer());
+        }
+    })
 }
 
 #[unwind_aborts]
 extern "system" fn gen_samplers(count: GLsizei, samplers: *mut GLuint) -> () {
-    todo!()
+    let samplers = user_array_mut(count, samplers);
+    with_context(|cx| {
+        for sampler in samplers {
+            *sampler = cx.samplers.add(cx.webgl.create_sampler());
+        }
+    })
 }
 
 #[unwind_aborts]
 extern "system" fn gen_textures(n: GLsizei, textures: *mut GLuint) -> () {
-    todo!()
+    let textures = user_array_mut(n, textures);
+    with_context(|cx| {
+        for texture in textures {
+            *texture = cx.textures.add(cx.webgl.create_texture());
+        }
+    })
 }
 
 #[unwind_aborts]
 extern "system" fn gen_transform_feedbacks(n: GLsizei, ids: *mut GLuint) -> () {
-    todo!()
+    let ids = user_array_mut(n, ids);
+    with_context(|cx| {
+        for id in ids {
+            *id = cx
+                .transform_feedbacks
+                .add(cx.webgl.create_transform_feedback());
+        }
+    })
 }
 
 #[unwind_aborts]
 extern "system" fn gen_vertex_arrays(n: GLsizei, arrays: *mut GLuint) -> () {
-    todo!()
+    let arrays = user_array_mut(n, arrays);
+    with_context(|cx| {
+        for va in arrays {
+            *va = cx.vertex_arrays.add(cx.webgl.create_vertex_array());
+        }
+    })
 }
 
 #[unwind_aborts]
@@ -1551,57 +1727,78 @@ extern "system" fn invalidate_sub_framebuffer(
 
 #[unwind_aborts]
 extern "system" fn is_buffer(buffer: GLuint) -> GLboolean {
-    todo!()
+    with_context(|cx| {
+        cx.buffers
+            .get_nullable(buffer)
+            .map(|buffer| gl_boolean(cx.webgl.is_buffer(buffer)))
+            .unwrap_or(gl::FALSE)
+    })
 }
 
 #[unwind_aborts]
 extern "system" fn is_enabled(cap: GLenum) -> GLboolean {
-    todo!()
+    with_context(|cx| gl_boolean(cx.webgl.is_enabled(cap)))
 }
 
 #[unwind_aborts]
 extern "system" fn is_framebuffer(framebuffer: GLuint) -> GLboolean {
-    todo!()
+    with_context(|cx| {
+        cx.framebuffers
+            .get_nullable(framebuffer)
+            .map(|fb| gl_boolean(cx.webgl.is_framebuffer(fb)))
+            .unwrap_or(gl::FALSE)
+    })
 }
 
 #[unwind_aborts]
 extern "system" fn is_program(program: GLuint) -> GLboolean {
     with_context(|cx| {
-        let program = match cx
-            .shaders
-            .get(program)
-            .and_then(ProgramOrShader::as_program)
-        {
-            Ok(p) => p,
-            Err(_) => return gl::FALSE,
-        };
-        gl_boolean(cx.webgl.is_program(Some(program)))
+        cx.shaders
+            .get_nullable(program)
+            .and_then(|opt| opt.map(ProgramOrShader::as_program).transpose())
+            .map(|program| gl_boolean(cx.webgl.is_program(program)))
+            .unwrap_or(gl::FALSE)
     })
 }
 
 #[unwind_aborts]
 extern "system" fn is_query(id: GLuint) -> GLboolean {
-    todo!()
+    with_context(|cx| {
+        cx.queries
+            .get_nullable(id)
+            .map(|query| gl_boolean(cx.webgl.is_query(query)))
+            .unwrap_or(gl::FALSE)
+    })
 }
 
 #[unwind_aborts]
 extern "system" fn is_renderbuffer(renderbuffer: GLuint) -> GLboolean {
-    todo!()
+    with_context(|cx| {
+        cx.renderbuffers
+            .get_nullable(renderbuffer)
+            .map(|rb| gl_boolean(cx.webgl.is_renderbuffer(rb)))
+            .unwrap_or(gl::FALSE)
+    })
 }
 
 #[unwind_aborts]
 extern "system" fn is_sampler(sampler: GLuint) -> GLboolean {
-    todo!()
+    with_context(|cx| {
+        cx.samplers
+            .get_nullable(sampler)
+            .map(|sampler| gl_boolean(cx.webgl.is_sampler(sampler)))
+            .unwrap_or(gl::FALSE)
+    })
 }
 
 #[unwind_aborts]
 extern "system" fn is_shader(shader: GLuint) -> GLboolean {
     with_context(|cx| {
-        let shader = match cx.shaders.get(shader).and_then(ProgramOrShader::as_shader) {
-            Ok(s) => s,
-            Err(_) => return gl::FALSE,
-        };
-        gl_boolean(cx.webgl.is_shader(Some(shader)))
+        cx.shaders
+            .get_nullable(shader)
+            .and_then(|opt| opt.map(ProgramOrShader::as_shader).transpose())
+            .map(|shader| gl_boolean(cx.webgl.is_shader(shader)))
+            .unwrap_or(gl::FALSE)
     })
 }
 
@@ -1612,17 +1809,32 @@ extern "system" fn is_sync(sync: GLsync) -> GLboolean {
 
 #[unwind_aborts]
 extern "system" fn is_texture(texture: GLuint) -> GLboolean {
-    todo!()
+    with_context(|cx| {
+        cx.textures
+            .get_nullable(texture)
+            .map(|texture| gl_boolean(cx.webgl.is_texture(texture)))
+            .unwrap_or(gl::FALSE)
+    })
 }
 
 #[unwind_aborts]
 extern "system" fn is_transform_feedback(id: GLuint) -> GLboolean {
-    todo!()
+    with_context(|cx| {
+        cx.transform_feedbacks
+            .get_nullable(id)
+            .map(|tf| gl_boolean(cx.webgl.is_transform_feedback(tf)))
+            .unwrap_or(gl::FALSE)
+    })
 }
 
 #[unwind_aborts]
 extern "system" fn is_vertex_array(array: GLuint) -> GLboolean {
-    todo!()
+    with_context(|cx| {
+        cx.vertex_arrays
+            .get_nullable(array)
+            .map(|va| gl_boolean(cx.webgl.is_vertex_array(va)))
+            .unwrap_or(gl::FALSE)
+    })
 }
 
 #[unwind_aborts]
@@ -1741,7 +1953,10 @@ extern "system" fn sample_coverage(value: GLfloat, invert: GLboolean) -> () {
 
 #[unwind_aborts]
 extern "system" fn sampler_parameterf(sampler: GLuint, pname: GLenum, param: GLfloat) -> () {
-    todo!()
+    try_with_context((), |cx| {
+        let sampler = cx.samplers.get(sampler)?;
+        Ok(cx.webgl.sampler_parameterf(sampler, pname, param))
+    })
 }
 
 #[unwind_aborts]
@@ -1755,7 +1970,10 @@ extern "system" fn sampler_parameterfv(
 
 #[unwind_aborts]
 extern "system" fn sampler_parameteri(sampler: GLuint, pname: GLenum, param: GLint) -> () {
-    todo!()
+    try_with_context((), |cx| {
+        let sampler = cx.samplers.get(sampler)?;
+        Ok(cx.webgl.sampler_parameteri(sampler, pname, param))
+    })
 }
 
 #[unwind_aborts]
