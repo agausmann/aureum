@@ -1,4 +1,5 @@
 use std::cell::{Ref, RefCell};
+use std::ffi::CStr;
 use std::os::raw::*;
 use std::rc::Rc;
 use std::{mem, slice};
@@ -6,7 +7,7 @@ use std::{mem, slice};
 use gl::types::*;
 use unwind_aborts::unwind_aborts;
 use webgl_stdweb as webgl;
-use webgl_stdweb::GLContext;
+use webgl_stdweb::{GLContext, WebGLProgram, WebGLShader};
 
 pub struct Context {
     inner: Rc<RefCell<ContextInner>>,
@@ -15,6 +16,91 @@ pub struct Context {
 struct ContextInner {
     webgl: GLContext,
     error_code: GLenum,
+    shaders: ObjectMap<ProgramOrShader>,
+}
+
+struct ObjectMap<T> {
+    objects: Vec<Option<T>>,
+}
+
+impl<T> ObjectMap<T> {
+    fn new() -> ObjectMap<T> {
+        ObjectMap {
+            objects: vec![None],
+        }
+    }
+
+    fn get(&self, id: GLuint) -> Result<&T, GLenum> {
+        self.objects
+            .get(id as usize)
+            .map(Option::as_ref)
+            .flatten()
+            .ok_or(gl::INVALID_VALUE)
+    }
+
+    fn add(&mut self, obj: Option<T>) -> GLuint {
+        if obj.is_some() {
+            for (id, slot) in self.objects.iter_mut().enumerate().skip(1) {
+                if slot.is_none() {
+                    *slot = obj;
+                }
+                return id as GLuint;
+            }
+            let id = self.objects.len();
+            self.objects.push(obj);
+            id as GLuint
+        } else {
+            0
+        }
+    }
+
+    fn remove(&mut self, id: GLuint) -> Result<Option<T>, GLenum> {
+        if id == 0 {
+            Ok(None)
+        } else {
+            self.objects
+                .get_mut(id as usize)
+                .map(Option::take)
+                .flatten()
+                .ok_or(gl::INVALID_VALUE)
+                .map(Some)
+        }
+    }
+}
+
+enum ProgramOrShader {
+    Program(WebGLProgram),
+    Shader(WebGLShader),
+}
+
+impl ProgramOrShader {
+    fn as_program(&self) -> Result<&WebGLProgram, GLenum> {
+        match self {
+            ProgramOrShader::Program(program) => Ok(program),
+            _ => Err(gl::INVALID_OPERATION),
+        }
+    }
+
+    fn as_shader(&self) -> Result<&WebGLShader, GLenum> {
+        match self {
+            ProgramOrShader::Shader(shader) => Ok(shader),
+            _ => Err(gl::INVALID_OPERATION),
+        }
+    }
+
+    fn to_program(self) -> Result<WebGLProgram, GLenum> {
+        match self {
+            ProgramOrShader::Program(program) => Ok(program),
+            _ => Err(gl::INVALID_OPERATION),
+        }
+    }
+
+    fn to_shader(self) -> Result<WebGLShader, GLenum> {
+        match self {
+            ProgramOrShader::Shader(shader) => Ok(shader),
+            _ => Err(gl::INVALID_OPERATION),
+        }
+    }
 }
 
 thread_local! {
@@ -67,6 +153,14 @@ fn user_array<'a, T>(size: GLsizei, data: *const T) -> &'a [T] {
 
 fn webgl_boolean(v: GLboolean) -> webgl::GLboolean {
     v != 0
+}
+
+fn gl_boolean(v: webgl::GLboolean) -> GLboolean {
+    v.into()
+}
+
+fn user_str<'a>(data: *const GLchar) -> Result<&'a str, GLenum> {
+    unsafe { CStr::from_ptr(data).to_str().ok().ok_or(gl::INVALID_VALUE) }
 }
 
 pub fn get_proc_address(name: &str) -> *const c_void {
@@ -329,7 +423,11 @@ extern "system" fn active_texture(texture: GLenum) -> () {
 }
 #[unwind_aborts]
 extern "system" fn attach_shader(program: GLuint, shader: GLuint) -> () {
-    todo!()
+    try_with_context((), |cx| {
+        let program = cx.shaders.get(program)?.as_program()?;
+        let shader = cx.shaders.get(shader)?.as_shader()?;
+        Ok(cx.webgl.attach_shader(program, shader))
+    })
 }
 #[unwind_aborts]
 extern "system" fn begin_query(target: GLenum, id: GLuint) -> () {
@@ -518,7 +616,10 @@ extern "system" fn color_mask(
 }
 #[unwind_aborts]
 extern "system" fn compile_shader(shader: GLuint) -> () {
-    todo!()
+    try_with_context((), |cx| {
+        let shader = cx.shaders.get(shader)?.as_shader()?;
+        Ok(cx.webgl.compile_shader(shader))
+    })
 }
 #[unwind_aborts]
 extern "system" fn compressed_tex_image2_d(
@@ -684,11 +785,17 @@ extern "system" fn copy_tex_sub_image3_d(
 }
 #[unwind_aborts]
 extern "system" fn create_program() -> GLuint {
-    todo!()
+    with_context(|cx| {
+        let program = cx.webgl.create_program();
+        cx.shaders.add(program.map(ProgramOrShader::Program))
+    })
 }
 #[unwind_aborts]
 extern "system" fn create_shader(type_: GLenum) -> GLuint {
-    todo!()
+    with_context(|cx| {
+        let shader = cx.webgl.create_shader(type_);
+        cx.shaders.add(shader.map(ProgramOrShader::Shader))
+    })
 }
 #[unwind_aborts]
 extern "system" fn cull_face(mode: GLenum) -> () {
@@ -704,7 +811,14 @@ extern "system" fn delete_framebuffers(n: GLsizei, framebuffers: *const GLuint) 
 }
 #[unwind_aborts]
 extern "system" fn delete_program(program: GLuint) -> () {
-    todo!()
+    try_with_context((), |cx| {
+        let program = cx
+            .shaders
+            .remove(program)?
+            .map(ProgramOrShader::to_program)
+            .transpose()?;
+        Ok(cx.webgl.delete_program(program.as_ref()))
+    })
 }
 #[unwind_aborts]
 extern "system" fn delete_queries(n: GLsizei, ids: *const GLuint) -> () {
@@ -720,7 +834,14 @@ extern "system" fn delete_samplers(count: GLsizei, samplers: *const GLuint) -> (
 }
 #[unwind_aborts]
 extern "system" fn delete_shader(shader: GLuint) -> () {
-    todo!()
+    try_with_context((), |cx| {
+        let shader = cx
+            .shaders
+            .remove(shader)?
+            .map(ProgramOrShader::to_shader)
+            .transpose()?;
+        Ok(cx.webgl.delete_shader(shader.as_ref()))
+    })
 }
 #[unwind_aborts]
 extern "system" fn delete_sync(sync: GLsync) -> () {
@@ -753,7 +874,11 @@ extern "system" fn depth_rangef(n: GLfloat, f: GLfloat) -> () {
 }
 #[unwind_aborts]
 extern "system" fn detach_shader(program: GLuint, shader: GLuint) -> () {
-    todo!()
+    try_with_context((), |cx| {
+        let program = cx.shaders.get(program)?.as_program()?;
+        let shader = cx.shaders.get(shader)?.as_shader()?;
+        Ok(cx.webgl.detach_shader(program, shader))
+    })
 }
 #[unwind_aborts]
 extern "system" fn disable(cap: GLenum) -> () {
@@ -983,7 +1108,11 @@ extern "system" fn get_attached_shaders(
 }
 #[unwind_aborts]
 extern "system" fn get_attrib_location(program: GLuint, name: *const GLchar) -> GLint {
-    todo!()
+    try_with_context(-1, |cx| {
+        let program = cx.shaders.get(program)?.as_program()?;
+        let name = user_str(name)?;
+        Ok(cx.webgl.get_attrib_location(program, name))
+    })
 }
 #[unwind_aborts]
 extern "system" fn get_booleanv(pname: GLenum, data: *mut GLboolean) -> () {
@@ -1025,7 +1154,11 @@ extern "system" fn get_floatv(pname: GLenum, data: *mut GLfloat) -> () {
 }
 #[unwind_aborts]
 extern "system" fn get_frag_data_location(program: GLuint, name: *const GLchar) -> GLint {
-    todo!()
+    try_with_context(-1, |cx| {
+        let program = cx.shaders.get(program)?.as_program()?;
+        let name = user_str(name)?;
+        Ok(cx.webgl.get_frag_data_location(program, name))
+    })
 }
 #[unwind_aborts]
 extern "system" fn get_framebuffer_attachment_parameteriv(
@@ -1191,7 +1324,11 @@ extern "system" fn get_uniform_block_index(
     program: GLuint,
     uniform_block_name: *const GLchar,
 ) -> GLuint {
-    todo!()
+    try_with_context(gl::INVALID_INDEX, |cx| {
+        let program = cx.shaders.get(program)?.as_program()?;
+        let name = user_str(uniform_block_name)?;
+        Ok(cx.webgl.get_uniform_block_index(program, name))
+    })
 }
 #[unwind_aborts]
 extern "system" fn get_uniform_indices(
@@ -1285,7 +1422,17 @@ extern "system" fn is_framebuffer(framebuffer: GLuint) -> GLboolean {
 }
 #[unwind_aborts]
 extern "system" fn is_program(program: GLuint) -> GLboolean {
-    todo!()
+    with_context(|cx| {
+        let program = match cx
+            .shaders
+            .get(program)
+            .and_then(ProgramOrShader::as_program)
+        {
+            Ok(p) => p,
+            Err(_) => return gl::FALSE,
+        };
+        gl_boolean(cx.webgl.is_program(Some(program)))
+    })
 }
 #[unwind_aborts]
 extern "system" fn is_query(id: GLuint) -> GLboolean {
@@ -1301,7 +1448,13 @@ extern "system" fn is_sampler(sampler: GLuint) -> GLboolean {
 }
 #[unwind_aborts]
 extern "system" fn is_shader(shader: GLuint) -> GLboolean {
-    todo!()
+    with_context(|cx| {
+        let shader = match cx.shaders.get(shader).and_then(ProgramOrShader::as_shader) {
+            Ok(s) => s,
+            Err(_) => return gl::FALSE,
+        };
+        gl_boolean(cx.webgl.is_shader(Some(shader)))
+    })
 }
 #[unwind_aborts]
 extern "system" fn is_sync(sync: GLsync) -> GLboolean {
@@ -1325,7 +1478,10 @@ extern "system" fn line_width(width: GLfloat) -> () {
 }
 #[unwind_aborts]
 extern "system" fn link_program(program: GLuint) -> () {
-    todo!()
+    try_with_context((), |cx| {
+        let program = cx.shaders.get(program)?.as_program()?;
+        Ok(cx.webgl.link_program(program))
+    })
 }
 #[unwind_aborts]
 extern "system" fn map_buffer_range(
@@ -1717,7 +1873,12 @@ extern "system" fn uniform_block_binding(
     uniform_block_index: GLuint,
     uniform_block_binding: GLuint,
 ) -> () {
-    todo!()
+    try_with_context((), |cx| {
+        let program = cx.shaders.get(program)?.as_program()?;
+        Ok(cx
+            .webgl
+            .uniform_block_binding(program, uniform_block_index, uniform_block_binding))
+    })
 }
 #[unwind_aborts]
 extern "system" fn uniform_matrix2fv(
@@ -1806,11 +1967,21 @@ extern "system" fn unmap_buffer(target: GLenum) -> GLboolean {
 }
 #[unwind_aborts]
 extern "system" fn use_program(program: GLuint) -> () {
-    todo!()
+    try_with_context((), |cx| {
+        let program = if program == 0 {
+            None
+        } else {
+            Some(cx.shaders.get(program)?.as_program()?)
+        };
+        Ok(cx.webgl.use_program(program))
+    })
 }
 #[unwind_aborts]
 extern "system" fn validate_program(program: GLuint) -> () {
-    todo!()
+    try_with_context((), |cx| {
+        let program = cx.shaders.get(program)?.as_program()?;
+        Ok(cx.webgl.validate_program(program))
+    })
 }
 #[unwind_aborts]
 extern "system" fn vertex_attrib1f(index: GLuint, x: GLfloat) -> () {
