@@ -2,7 +2,7 @@ use std::cell::{Ref, RefCell};
 use std::ffi::CStr;
 use std::os::raw::*;
 use std::rc::Rc;
-use std::{mem, slice};
+use std::{mem, slice, str};
 
 use gl::types::*;
 use unwind_aborts::unwind_aborts;
@@ -193,6 +193,14 @@ fn user_array<'a, T>(size: GLsizei, data: *const T) -> &'a [T] {
     unsafe { slice::from_raw_parts(data, size as usize) }
 }
 
+fn user_array_nullable<'a, T>(size: GLsizei, data: *const T) -> Option<&'a [T]> {
+    if data.is_null() {
+        None
+    } else {
+        unsafe { Some(slice::from_raw_parts(data, size as usize)) }
+    }
+}
+
 fn user_array_mut<'a, T>(size: GLsizei, data: *mut T) -> &'a mut [T] {
     unsafe { slice::from_raw_parts_mut(data, size as usize) }
 }
@@ -206,7 +214,14 @@ fn gl_boolean(v: webgl::GLboolean) -> GLboolean {
 }
 
 fn user_str<'a>(data: *const GLchar) -> Result<&'a str, GLenum> {
-    unsafe { CStr::from_ptr(data).to_str().ok().ok_or(gl::INVALID_VALUE) }
+    unsafe { CStr::from_ptr(data).to_str().map_err(|_| gl::INVALID_VALUE) }
+}
+
+fn user_str_bounded<'a>(len: GLsizei, data: *const GLchar) -> Result<&'a str, GLenum> {
+    unsafe {
+        str::from_utf8(slice::from_raw_parts(data as *const u8, len as usize))
+            .map_err(|_| gl::INVALID_VALUE)
+    }
 }
 
 fn user_mut<'a, T>(data: *mut T) -> &'a mut T {
@@ -2166,7 +2181,32 @@ extern "system" fn shader_source(
     string: *const *const GLchar,
     length: *const GLint,
 ) -> () {
-    todo!()
+    try_with_context((), |cx| {
+        let shader = cx.shaders.get(shader)?.as_shader()?;
+        let string = user_array(count, string);
+        let length = user_array_nullable(count, length);
+
+        let mut source_buf = String::new();
+        for i in 0..count as usize {
+            let maybe_len = length.and_then(|slice| {
+                let len = slice[i];
+                if len < 0 {
+                    None
+                } else {
+                    Some(len as GLsizei)
+                }
+            });
+
+            let source_part;
+            if let Some(len) = maybe_len {
+                source_part = user_str_bounded(len, string[i])?;
+            } else {
+                source_part = user_str(string[i])?;
+            }
+            source_buf.push_str(source_part);
+        }
+        Ok(cx.webgl.shader_source(shader, &source_buf))
+    })
 }
 
 #[unwind_aborts]
