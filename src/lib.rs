@@ -2,10 +2,12 @@ use std::cell::{Ref, RefCell};
 use std::ffi::CStr;
 use std::os::raw::*;
 use std::rc::Rc;
-use std::{mem, slice, str};
+use std::{mem, ptr, slice, str};
 
 use gl::types::*;
+use stdweb::{Reference, Value};
 use unwind_aborts::unwind_aborts;
+use ustr::ustr;
 use webgl_stdweb as webgl;
 use webgl_stdweb::{
     GLContext, WebGLActiveInfo, WebGLBuffer, WebGLFramebuffer, WebGLProgram, WebGLQuery,
@@ -62,7 +64,7 @@ impl<T> ObjectMap<T> {
 
     fn find(&mut self, obj: T) -> GLuint
     where
-        T: AsRef<stdweb::Reference>,
+        T: AsRef<Reference>,
     {
         for (id, slot) in self.objects.iter_mut().enumerate().skip(1) {
             if slot.as_ref().map(AsRef::as_ref) == Some(obj.as_ref()) {
@@ -115,39 +117,48 @@ impl UniformMap {
         }
     }
 
-    fn active_uniforms(&self) -> &Vec<WebGLUniformLocation> {
-        &self.map[self.active_program as usize]
+    fn uniforms(&self, program: GLuint) -> &Vec<WebGLUniformLocation> {
+        &self.map[program as usize]
     }
 
-    fn active_uniforms_mut(&mut self) -> &mut Vec<WebGLUniformLocation> {
-        &mut self.map[self.active_program as usize]
+    fn uniforms_mut(&mut self, program: GLuint) -> &mut Vec<WebGLUniformLocation> {
+        &mut self.map[program as usize]
     }
 
-    fn get_obj(&self, id: GLint) -> Result<&WebGLUniformLocation, GLenum> {
-        self.get_obj_nullable(id)
+    fn get_obj(&self, program: GLuint, id: GLint) -> Result<&WebGLUniformLocation, GLenum> {
+        self.get_obj_nullable(program, id)
             .and_then(|opt| opt.ok_or(gl::INVALID_OPERATION))
     }
 
-    fn get_obj_nullable(&self, id: GLint) -> Result<Option<&WebGLUniformLocation>, GLenum> {
+    fn get_obj_nullable(
+        &self,
+        program: GLuint,
+        id: GLint,
+    ) -> Result<Option<&WebGLUniformLocation>, GLenum> {
         if id < 0 {
             Ok(None)
         } else {
-            self.active_uniforms()
+            self.uniforms(program)
                 .get(id as usize)
                 .ok_or(gl::INVALID_OPERATION)
                 .map(Some)
         }
     }
 
+    fn get_active_obj_nullable(&self, id: GLint) -> Result<Option<&WebGLUniformLocation>, GLenum> {
+        self.get_obj_nullable(self.active_program, id)
+    }
+
     fn get_id(&mut self, obj: Option<WebGLUniformLocation>) -> GLint {
+        let uniforms = self.uniforms_mut(self.active_program);
         if let Some(obj) = obj {
-            for (i, registered) in self.active_uniforms().iter().enumerate() {
+            for (i, registered) in uniforms.iter().enumerate() {
                 if registered.as_ref() == obj.as_ref() {
                     return i as GLint;
                 }
             }
-            let id = self.active_uniforms().len();
-            self.active_uniforms_mut().push(obj);
+            let id = uniforms.len();
+            uniforms.push(obj);
             id as GLint
         } else {
             -1
@@ -172,8 +183,8 @@ enum ProgramOrShader {
     Shader(WebGLShader),
 }
 
-impl AsRef<stdweb::Reference> for ProgramOrShader {
-    fn as_ref(&self) -> &stdweb::Reference {
+impl AsRef<Reference> for ProgramOrShader {
+    fn as_ref(&self) -> &Reference {
         match self {
             Self::Program(program) => program.as_ref(),
             Self::Shader(shader) => shader.as_ref(),
@@ -337,6 +348,119 @@ fn unpack_active_info(
     unpack_str(buf_size, length, name, &info_src.name());
     *size = info_src.size();
     *type_ = info_src.type_();
+}
+
+trait Parameter: Sized {
+    fn from_webgl(value: Value) -> Self;
+
+    fn from_webgl_normalized(value: Value) -> Self {
+        Self::from_webgl(value)
+    }
+}
+
+macro_rules! impl_parameter_for_int {
+    ($($ty:ty),*$(,)?) => {$(
+        impl Parameter for $ty {
+            fn from_webgl(value: Value) -> Self {
+                match value {
+                    Value::Bool(true) => 1,
+                    Value::Number(number) => {
+                        let number = f64::from(number);
+                        if number > Self::max_value() as f64 {
+                            Self::max_value()
+                        } else if number < Self::min_value() as f64 {
+                            Self::min_value()
+                        } else {
+                            number.round() as Self
+                        }
+                    }
+                    _ => 0,
+                }
+            }
+
+            fn from_webgl_normalized(value: Value) -> Self {
+                match value {
+                    Value::Bool(true) => 1,
+                    Value::Number(number) => {
+                        // Equations 2.3 and 2.4 from the GLES 3.0 spec:
+                        (f64::from(number) * Self::max_value() as f64).round() as Self
+                    }
+                    _ => 0,
+                }
+            }
+        }
+    )*};
+}
+
+impl_parameter_for_int!(GLint, GLuint, GLint64);
+
+impl Parameter for GLboolean {
+    fn from_webgl(value: Value) -> Self {
+        match value {
+            Value::Bool(true) => gl::TRUE,
+            Value::Number(number) if number != 0 => gl::TRUE,
+            _ => gl::FALSE,
+        }
+    }
+}
+
+impl Parameter for GLfloat {
+    fn from_webgl(value: Value) -> Self {
+        match value {
+            Value::Bool(true) => 1.0,
+            Value::Number(number) => f64::from(number) as GLfloat,
+            _ => 0.0,
+        }
+    }
+}
+
+fn unpack_parameter<T: Parameter>(pname: GLenum, dst: *mut T, src: Value) {
+    unpack_parameter_bounded(pname, GLsizei::max_value(), ptr::null_mut(), dst, src)
+}
+
+fn unpack_parameter_bounded<T: Parameter>(
+    pname: GLenum,
+    buf_size: GLsizei,
+    dst_len: *mut GLsizei,
+    dst: *mut T,
+    src: Value,
+) {
+    let normalized = match pname {
+        gl::DEPTH_RANGE | gl::BLEND_COLOR | gl::COLOR_CLEAR_VALUE | gl::DEPTH_CLEAR_VALUE => true,
+        _ => false,
+    };
+    if let Some(arr) = src.as_array() {
+        let src: Vec<Value> = arr.into();
+        let copy_len = buf_size.min(arr.len() as GLsizei);
+        let dst_len = user_nullable_mut(dst_len);
+        let dst = user_array_mut(copy_len, dst);
+
+        for (dst, src) in dst.iter_mut().zip(src) {
+            *dst = if normalized {
+                Parameter::from_webgl_normalized(src)
+            } else {
+                Parameter::from_webgl(src)
+            };
+        }
+        if let Some(dst_len) = dst_len {
+            *dst_len = copy_len;
+        }
+    } else {
+        let dst = user_mut(dst);
+        *dst = if normalized {
+            Parameter::from_webgl_normalized(src)
+        } else {
+            Parameter::from_webgl(src)
+        }
+    }
+}
+
+fn cache_string(value: Value) -> *const GLubyte {
+    if let Some(s) = value.as_str() {
+        unsafe { ustr(s).as_char_ptr() as *const _ }
+    } else {
+        ptr::null()
+    }
 }
 
 pub fn get_proc_address(name: &str) -> *const c_void {
@@ -589,7 +713,7 @@ pub fn get_proc_address(name: &str) -> *const c_void {
         "glVertexAttribPointer" => vertex_attrib_pointer as *const _,
         "glViewport" => viewport as *const _,
         "glWaitSync" => wait_sync as *const _,
-        _ => std::ptr::null(),
+        _ => ptr::null(),
     }
 }
 
@@ -1535,7 +1659,14 @@ extern "system" fn get_active_uniform_blockiv(
     pname: GLenum,
     params: *mut GLint,
 ) -> () {
-    todo!()
+    try_with_context((), |cx| {
+        let program = cx.shaders.get(program)?.as_program()?;
+        let value =
+            cx.webgl
+                .get_active_uniform_block_parameter(program, uniform_block_index, pname);
+        unpack_parameter(pname, params, value);
+        Ok(())
+    })
 }
 
 #[unwind_aborts]
@@ -1546,7 +1677,15 @@ extern "system" fn get_active_uniformsiv(
     pname: GLenum,
     params: *mut GLint,
 ) -> () {
-    todo!()
+    try_with_context((), |cx| {
+        let program = cx.shaders.get(program)?.as_program()?;
+        let uniform_indices = user_array(uniform_count, uniform_indices);
+        let value = cx
+            .webgl
+            .get_active_uniforms(program, uniform_indices, pname);
+        unpack_parameter(pname, params, value);
+        Ok(())
+    })
 }
 
 #[unwind_aborts]
@@ -1580,7 +1719,10 @@ extern "system" fn get_attrib_location(program: GLuint, name: *const GLchar) -> 
 
 #[unwind_aborts]
 extern "system" fn get_booleanv(pname: GLenum, data: *mut GLboolean) -> () {
-    todo!()
+    with_context(|cx| {
+        let value = cx.webgl.get_parameter(pname);
+        unpack_parameter(pname, data, value);
+    })
 }
 
 #[unwind_aborts]
@@ -1589,12 +1731,18 @@ extern "system" fn get_buffer_parameteri64v(
     pname: GLenum,
     params: *mut GLint64,
 ) -> () {
-    todo!()
+    with_context(|cx| {
+        let value = cx.webgl.get_buffer_parameter(target, pname);
+        unpack_parameter(pname, params, value);
+    })
 }
 
 #[unwind_aborts]
 extern "system" fn get_buffer_parameteriv(target: GLenum, pname: GLenum, params: *mut GLint) -> () {
-    todo!()
+    with_context(|cx| {
+        let value = cx.webgl.get_buffer_parameter(target, pname);
+        unpack_parameter(pname, params, value);
+    })
 }
 
 #[unwind_aborts]
@@ -1619,7 +1767,10 @@ extern "system" fn get_error() -> GLenum {
 
 #[unwind_aborts]
 extern "system" fn get_floatv(pname: GLenum, data: *mut GLfloat) -> () {
-    todo!()
+    with_context(|cx| {
+        let value = cx.webgl.get_parameter(pname);
+        unpack_parameter(pname, data, value);
+    })
 }
 
 #[unwind_aborts]
@@ -1638,27 +1789,44 @@ extern "system" fn get_framebuffer_attachment_parameteriv(
     pname: GLenum,
     params: *mut GLint,
 ) -> () {
-    todo!()
+    with_context(|cx| {
+        let value = cx
+            .webgl
+            .get_framebuffer_attachment_parameter(target, attachment, pname);
+        unpack_parameter(pname, params, value);
+    })
 }
 
 #[unwind_aborts]
 extern "system" fn get_integer64i_v(target: GLenum, index: GLuint, data: *mut GLint64) -> () {
-    todo!()
+    with_context(|cx| {
+        let value = cx.webgl.get_indexed_parameter(target, index);
+        unpack_parameter(target, data, value);
+    })
 }
 
 #[unwind_aborts]
 extern "system" fn get_integer64v(pname: GLenum, data: *mut GLint64) -> () {
-    todo!()
+    with_context(|cx| {
+        let value = cx.webgl.get_parameter(pname);
+        unpack_parameter(pname, data, value);
+    })
 }
 
 #[unwind_aborts]
 extern "system" fn get_integeri_v(target: GLenum, index: GLuint, data: *mut GLint) -> () {
-    todo!()
+    with_context(|cx| {
+        let value = cx.webgl.get_indexed_parameter(target, index);
+        unpack_parameter(target, data, value);
+    })
 }
 
 #[unwind_aborts]
 extern "system" fn get_integerv(pname: GLenum, data: *mut GLint) -> () {
-    todo!()
+    with_context(|cx| {
+        let value = cx.webgl.get_parameter(pname);
+        unpack_parameter(pname, data, value);
+    })
 }
 
 #[unwind_aborts]
@@ -1669,7 +1837,12 @@ extern "system" fn get_internalformativ(
     buf_size: GLsizei,
     params: *mut GLint,
 ) -> () {
-    todo!()
+    with_context(|cx| {
+        let value = cx
+            .webgl
+            .get_internalformat_parameter(target, internalformat, pname);
+        unpack_parameter_bounded(pname, buf_size, ptr::null_mut(), params, value);
+    })
 }
 
 #[unwind_aborts]
@@ -1701,17 +1874,36 @@ extern "system" fn get_program_info_log(
 
 #[unwind_aborts]
 extern "system" fn get_programiv(program: GLuint, pname: GLenum, params: *mut GLint) -> () {
-    todo!()
+    try_with_context((), |cx| {
+        let program = cx.shaders.get(program)?.as_program()?;
+        let value = cx.webgl.get_program_parameter(program, pname);
+        unpack_parameter(pname, params, value);
+        Ok(())
+    })
 }
 
 #[unwind_aborts]
 extern "system" fn get_query_objectuiv(id: GLuint, pname: GLenum, params: *mut GLuint) -> () {
-    todo!()
+    try_with_context((), |cx| {
+        let query = cx.queries.get(id)?;
+        let value = cx.webgl.get_query_parameter(query, pname);
+        unpack_parameter(pname, params, value);
+        Ok(())
+    })
 }
 
 #[unwind_aborts]
 extern "system" fn get_queryiv(target: GLenum, pname: GLenum, params: *mut GLint) -> () {
-    todo!()
+    try_with_context((), |cx| {
+        let params = user_mut(params);
+        let query = cx.webgl.get_query(target, pname);
+        if let Some(query) = query {
+            *params = cx.queries.find(query) as GLint;
+        } else {
+            *params = 0;
+        }
+        Ok(())
+    })
 }
 
 #[unwind_aborts]
@@ -1720,7 +1912,10 @@ extern "system" fn get_renderbuffer_parameteriv(
     pname: GLenum,
     params: *mut GLint,
 ) -> () {
-    todo!()
+    with_context(|cx| {
+        let value = cx.webgl.get_renderbuffer_parameter(target, pname);
+        unpack_parameter(pname, params, value);
+    })
 }
 
 #[unwind_aborts]
@@ -1729,7 +1924,12 @@ extern "system" fn get_sampler_parameterfv(
     pname: GLenum,
     params: *mut GLfloat,
 ) -> () {
-    todo!()
+    try_with_context((), |cx| {
+        let sampler = cx.samplers.get(sampler)?;
+        let value = cx.webgl.get_sampler_parameter(sampler, pname);
+        unpack_parameter(pname, params, value);
+        Ok(())
+    })
 }
 
 #[unwind_aborts]
@@ -1738,7 +1938,12 @@ extern "system" fn get_sampler_parameteriv(
     pname: GLenum,
     params: *mut GLint,
 ) -> () {
-    todo!()
+    try_with_context((), |cx| {
+        let sampler = cx.samplers.get(sampler)?;
+        let value = cx.webgl.get_sampler_parameter(sampler, pname);
+        unpack_parameter(pname, params, value);
+        Ok(())
+    })
 }
 
 #[unwind_aborts]
@@ -1796,17 +2001,22 @@ extern "system" fn get_shader_source(
 
 #[unwind_aborts]
 extern "system" fn get_shaderiv(shader: GLuint, pname: GLenum, params: *mut GLint) -> () {
-    todo!()
+    try_with_context((), |cx| {
+        let shader = cx.shaders.get(shader)?.as_shader()?;
+        let value = cx.webgl.get_shader_parameter(shader, pname);
+        unpack_parameter(pname, params, value);
+        Ok(())
+    })
 }
 
 #[unwind_aborts]
 extern "system" fn get_string(name: GLenum) -> *const GLubyte {
-    todo!()
+    with_context(|cx| cache_string(cx.webgl.get_parameter(name)))
 }
 
 #[unwind_aborts]
 extern "system" fn get_stringi(name: GLenum, index: GLuint) -> *const GLubyte {
-    todo!()
+    with_context(|cx| cache_string(cx.webgl.get_indexed_parameter(name, index)))
 }
 
 #[unwind_aborts]
@@ -1817,17 +2027,28 @@ extern "system" fn get_synciv(
     length: *mut GLsizei,
     values: *mut GLint,
 ) -> () {
-    todo!()
+    try_with_context((), |cx| {
+        let sync = cx.syncs.get(sync as GLuint)?;
+        let value = cx.webgl.get_sync_parameter(sync, pname);
+        unpack_parameter_bounded(pname, buf_size, length, values, value);
+        Ok(())
+    })
 }
 
 #[unwind_aborts]
 extern "system" fn get_tex_parameterfv(target: GLenum, pname: GLenum, params: *mut GLfloat) -> () {
-    todo!()
+    with_context(|cx| {
+        let value = cx.webgl.get_tex_parameter(target, pname);
+        unpack_parameter(pname, params, value);
+    })
 }
 
 #[unwind_aborts]
 extern "system" fn get_tex_parameteriv(target: GLenum, pname: GLenum, params: *mut GLint) -> () {
-    todo!()
+    with_context(|cx| {
+        let value = cx.webgl.get_tex_parameter(target, pname);
+        unpack_parameter(pname, params, value);
+    })
 }
 
 #[unwind_aborts]
@@ -1897,27 +2118,51 @@ extern "system" fn get_uniform_location(program: GLuint, name: *const GLchar) ->
 
 #[unwind_aborts]
 extern "system" fn get_uniformfv(program: GLuint, location: GLint, params: *mut GLfloat) -> () {
-    todo!()
+    try_with_context((), |cx| {
+        let location = cx.uniforms.get_obj(program, location)?;
+        let program = cx.shaders.get(program)?.as_program()?;
+        let value = cx.webgl.get_uniform(program, location);
+        unpack_parameter(gl::NONE, params, value);
+        Ok(())
+    })
 }
 
 #[unwind_aborts]
 extern "system" fn get_uniformiv(program: GLuint, location: GLint, params: *mut GLint) -> () {
-    todo!()
+    try_with_context((), |cx| {
+        let location = cx.uniforms.get_obj(program, location)?;
+        let program = cx.shaders.get(program)?.as_program()?;
+        let value = cx.webgl.get_uniform(program, location);
+        unpack_parameter(gl::NONE, params, value);
+        Ok(())
+    })
 }
 
 #[unwind_aborts]
 extern "system" fn get_uniformuiv(program: GLuint, location: GLint, params: *mut GLuint) -> () {
-    todo!()
+    try_with_context((), |cx| {
+        let location = cx.uniforms.get_obj(program, location)?;
+        let program = cx.shaders.get(program)?.as_program()?;
+        let value = cx.webgl.get_uniform(program, location);
+        unpack_parameter(gl::NONE, params, value);
+        Ok(())
+    })
 }
 
 #[unwind_aborts]
 extern "system" fn get_vertex_attrib_iiv(index: GLuint, pname: GLenum, params: *mut GLint) -> () {
-    todo!()
+    with_context(|cx| {
+        let value = cx.webgl.get_vertex_attrib(index, pname);
+        unpack_parameter(pname, params, value);
+    })
 }
 
 #[unwind_aborts]
 extern "system" fn get_vertex_attrib_iuiv(index: GLuint, pname: GLenum, params: *mut GLuint) -> () {
-    todo!()
+    with_context(|cx| {
+        let value = cx.webgl.get_vertex_attrib(index, pname);
+        unpack_parameter(pname, params, value);
+    })
 }
 
 #[unwind_aborts]
@@ -1931,12 +2176,18 @@ extern "system" fn get_vertex_attrib_pointerv(
 
 #[unwind_aborts]
 extern "system" fn get_vertex_attribfv(index: GLuint, pname: GLenum, params: *mut GLfloat) -> () {
-    todo!()
+    with_context(|cx| {
+        let value = cx.webgl.get_vertex_attrib(index, pname);
+        unpack_parameter(pname, params, value);
+    })
 }
 
 #[unwind_aborts]
 extern "system" fn get_vertex_attribiv(index: GLuint, pname: GLenum, params: *mut GLint) -> () {
-    todo!()
+    with_context(|cx| {
+        let value = cx.webgl.get_vertex_attrib(index, pname);
+        unpack_parameter(pname, params, value);
+    })
 }
 
 #[unwind_aborts]
@@ -2216,7 +2467,8 @@ extern "system" fn sampler_parameterfv(
     pname: GLenum,
     param: *const GLfloat,
 ) -> () {
-    todo!()
+    let param = user_array(1, param);
+    sampler_parameterf(sampler, pname, param[0])
 }
 
 #[unwind_aborts]
@@ -2229,7 +2481,8 @@ extern "system" fn sampler_parameteri(sampler: GLuint, pname: GLenum, param: GLi
 
 #[unwind_aborts]
 extern "system" fn sampler_parameteriv(sampler: GLuint, pname: GLenum, param: *const GLint) -> () {
-    todo!()
+    let param = user_array(1, param);
+    sampler_parameteri(sampler, pname, param[0])
 }
 
 #[unwind_aborts]
@@ -2361,7 +2614,8 @@ extern "system" fn tex_parameterf(target: GLenum, pname: GLenum, param: GLfloat)
 
 #[unwind_aborts]
 extern "system" fn tex_parameterfv(target: GLenum, pname: GLenum, params: *const GLfloat) -> () {
-    todo!()
+    let params = user_array(1, params);
+    tex_parameterf(target, pname, params[0]);
 }
 
 #[unwind_aborts]
@@ -2371,7 +2625,8 @@ extern "system" fn tex_parameteri(target: GLenum, pname: GLenum, param: GLint) -
 
 #[unwind_aborts]
 extern "system" fn tex_parameteriv(target: GLenum, pname: GLenum, params: *const GLint) -> () {
-    todo!()
+    let params = user_array(1, params);
+    tex_parameteri(target, pname, params[0]);
 }
 
 #[unwind_aborts]
@@ -2458,7 +2713,7 @@ extern "system" fn transform_feedback_varyings(
 #[unwind_aborts]
 extern "system" fn uniform1f(location: GLint, v0: GLfloat) -> () {
     try_with_context((), |cx| {
-        let location = cx.uniforms.get_obj_nullable(location)?;
+        let location = cx.uniforms.get_active_obj_nullable(location)?;
         Ok(cx.webgl.uniform1f(location, v0))
     })
 }
@@ -2466,7 +2721,7 @@ extern "system" fn uniform1f(location: GLint, v0: GLfloat) -> () {
 #[unwind_aborts]
 extern "system" fn uniform1fv(location: GLint, count: GLsizei, value: *const GLfloat) -> () {
     try_with_context((), |cx| {
-        let location = cx.uniforms.get_obj_nullable(location)?;
+        let location = cx.uniforms.get_active_obj_nullable(location)?;
         let value = user_array(1 * count, value);
         Ok(cx.webgl.uniform1fv(location, value, 0, 0))
     })
@@ -2475,7 +2730,7 @@ extern "system" fn uniform1fv(location: GLint, count: GLsizei, value: *const GLf
 #[unwind_aborts]
 extern "system" fn uniform1i(location: GLint, v0: GLint) -> () {
     try_with_context((), |cx| {
-        let location = cx.uniforms.get_obj_nullable(location)?;
+        let location = cx.uniforms.get_active_obj_nullable(location)?;
         Ok(cx.webgl.uniform1i(location, v0))
     })
 }
@@ -2483,7 +2738,7 @@ extern "system" fn uniform1i(location: GLint, v0: GLint) -> () {
 #[unwind_aborts]
 extern "system" fn uniform1iv(location: GLint, count: GLsizei, value: *const GLint) -> () {
     try_with_context((), |cx| {
-        let location = cx.uniforms.get_obj_nullable(location)?;
+        let location = cx.uniforms.get_active_obj_nullable(location)?;
         let value = user_array(1 * count, value);
         Ok(cx.webgl.uniform1iv(location, value, 0, 0))
     })
@@ -2492,7 +2747,7 @@ extern "system" fn uniform1iv(location: GLint, count: GLsizei, value: *const GLi
 #[unwind_aborts]
 extern "system" fn uniform1ui(location: GLint, v0: GLuint) -> () {
     try_with_context((), |cx| {
-        let location = cx.uniforms.get_obj_nullable(location)?;
+        let location = cx.uniforms.get_active_obj_nullable(location)?;
         Ok(cx.webgl.uniform1ui(location, v0))
     })
 }
@@ -2500,7 +2755,7 @@ extern "system" fn uniform1ui(location: GLint, v0: GLuint) -> () {
 #[unwind_aborts]
 extern "system" fn uniform1uiv(location: GLint, count: GLsizei, value: *const GLuint) -> () {
     try_with_context((), |cx| {
-        let location = cx.uniforms.get_obj_nullable(location)?;
+        let location = cx.uniforms.get_active_obj_nullable(location)?;
         let value = user_array(1 * count, value);
         Ok(cx.webgl.uniform1uiv(location, value, 0, 0))
     })
@@ -2509,7 +2764,7 @@ extern "system" fn uniform1uiv(location: GLint, count: GLsizei, value: *const GL
 #[unwind_aborts]
 extern "system" fn uniform2f(location: GLint, v0: GLfloat, v1: GLfloat) -> () {
     try_with_context((), |cx| {
-        let location = cx.uniforms.get_obj_nullable(location)?;
+        let location = cx.uniforms.get_active_obj_nullable(location)?;
         Ok(cx.webgl.uniform2f(location, v0, v1))
     })
 }
@@ -2517,7 +2772,7 @@ extern "system" fn uniform2f(location: GLint, v0: GLfloat, v1: GLfloat) -> () {
 #[unwind_aborts]
 extern "system" fn uniform2fv(location: GLint, count: GLsizei, value: *const GLfloat) -> () {
     try_with_context((), |cx| {
-        let location = cx.uniforms.get_obj_nullable(location)?;
+        let location = cx.uniforms.get_active_obj_nullable(location)?;
         let value = user_array(2 * count, value);
         Ok(cx.webgl.uniform2fv(location, value, 0, 0))
     })
@@ -2526,7 +2781,7 @@ extern "system" fn uniform2fv(location: GLint, count: GLsizei, value: *const GLf
 #[unwind_aborts]
 extern "system" fn uniform2i(location: GLint, v0: GLint, v1: GLint) -> () {
     try_with_context((), |cx| {
-        let location = cx.uniforms.get_obj_nullable(location)?;
+        let location = cx.uniforms.get_active_obj_nullable(location)?;
         Ok(cx.webgl.uniform2i(location, v0, v1))
     })
 }
@@ -2534,7 +2789,7 @@ extern "system" fn uniform2i(location: GLint, v0: GLint, v1: GLint) -> () {
 #[unwind_aborts]
 extern "system" fn uniform2iv(location: GLint, count: GLsizei, value: *const GLint) -> () {
     try_with_context((), |cx| {
-        let location = cx.uniforms.get_obj_nullable(location)?;
+        let location = cx.uniforms.get_active_obj_nullable(location)?;
         let value = user_array(2 * count, value);
         Ok(cx.webgl.uniform2iv(location, value, 0, 0))
     })
@@ -2543,7 +2798,7 @@ extern "system" fn uniform2iv(location: GLint, count: GLsizei, value: *const GLi
 #[unwind_aborts]
 extern "system" fn uniform2ui(location: GLint, v0: GLuint, v1: GLuint) -> () {
     try_with_context((), |cx| {
-        let location = cx.uniforms.get_obj_nullable(location)?;
+        let location = cx.uniforms.get_active_obj_nullable(location)?;
         Ok(cx.webgl.uniform2ui(location, v0, v1))
     })
 }
@@ -2551,7 +2806,7 @@ extern "system" fn uniform2ui(location: GLint, v0: GLuint, v1: GLuint) -> () {
 #[unwind_aborts]
 extern "system" fn uniform2uiv(location: GLint, count: GLsizei, value: *const GLuint) -> () {
     try_with_context((), |cx| {
-        let location = cx.uniforms.get_obj_nullable(location)?;
+        let location = cx.uniforms.get_active_obj_nullable(location)?;
         let value = user_array(2 * count, value);
         Ok(cx.webgl.uniform2uiv(location, value, 0, 0))
     })
@@ -2560,7 +2815,7 @@ extern "system" fn uniform2uiv(location: GLint, count: GLsizei, value: *const GL
 #[unwind_aborts]
 extern "system" fn uniform3f(location: GLint, v0: GLfloat, v1: GLfloat, v2: GLfloat) -> () {
     try_with_context((), |cx| {
-        let location = cx.uniforms.get_obj_nullable(location)?;
+        let location = cx.uniforms.get_active_obj_nullable(location)?;
         Ok(cx.webgl.uniform3f(location, v0, v1, v2))
     })
 }
@@ -2568,7 +2823,7 @@ extern "system" fn uniform3f(location: GLint, v0: GLfloat, v1: GLfloat, v2: GLfl
 #[unwind_aborts]
 extern "system" fn uniform3fv(location: GLint, count: GLsizei, value: *const GLfloat) -> () {
     try_with_context((), |cx| {
-        let location = cx.uniforms.get_obj_nullable(location)?;
+        let location = cx.uniforms.get_active_obj_nullable(location)?;
         let value = user_array(3 * count, value);
         Ok(cx.webgl.uniform3fv(location, value, 0, 0))
     })
@@ -2577,7 +2832,7 @@ extern "system" fn uniform3fv(location: GLint, count: GLsizei, value: *const GLf
 #[unwind_aborts]
 extern "system" fn uniform3i(location: GLint, v0: GLint, v1: GLint, v2: GLint) -> () {
     try_with_context((), |cx| {
-        let location = cx.uniforms.get_obj_nullable(location)?;
+        let location = cx.uniforms.get_active_obj_nullable(location)?;
         Ok(cx.webgl.uniform3i(location, v0, v1, v2))
     })
 }
@@ -2585,7 +2840,7 @@ extern "system" fn uniform3i(location: GLint, v0: GLint, v1: GLint, v2: GLint) -
 #[unwind_aborts]
 extern "system" fn uniform3iv(location: GLint, count: GLsizei, value: *const GLint) -> () {
     try_with_context((), |cx| {
-        let location = cx.uniforms.get_obj_nullable(location)?;
+        let location = cx.uniforms.get_active_obj_nullable(location)?;
         let value = user_array(3 * count, value);
         Ok(cx.webgl.uniform3iv(location, value, 0, 0))
     })
@@ -2594,7 +2849,7 @@ extern "system" fn uniform3iv(location: GLint, count: GLsizei, value: *const GLi
 #[unwind_aborts]
 extern "system" fn uniform3ui(location: GLint, v0: GLuint, v1: GLuint, v2: GLuint) -> () {
     try_with_context((), |cx| {
-        let location = cx.uniforms.get_obj_nullable(location)?;
+        let location = cx.uniforms.get_active_obj_nullable(location)?;
         Ok(cx.webgl.uniform3ui(location, v0, v1, v2))
     })
 }
@@ -2602,7 +2857,7 @@ extern "system" fn uniform3ui(location: GLint, v0: GLuint, v1: GLuint, v2: GLuin
 #[unwind_aborts]
 extern "system" fn uniform3uiv(location: GLint, count: GLsizei, value: *const GLuint) -> () {
     try_with_context((), |cx| {
-        let location = cx.uniforms.get_obj_nullable(location)?;
+        let location = cx.uniforms.get_active_obj_nullable(location)?;
         let value = user_array(3 * count, value);
         Ok(cx.webgl.uniform3uiv(location, value, 0, 0))
     })
@@ -2617,7 +2872,7 @@ extern "system" fn uniform4f(
     v3: GLfloat,
 ) -> () {
     try_with_context((), |cx| {
-        let location = cx.uniforms.get_obj_nullable(location)?;
+        let location = cx.uniforms.get_active_obj_nullable(location)?;
         Ok(cx.webgl.uniform4f(location, v0, v1, v2, v3))
     })
 }
@@ -2625,7 +2880,7 @@ extern "system" fn uniform4f(
 #[unwind_aborts]
 extern "system" fn uniform4fv(location: GLint, count: GLsizei, value: *const GLfloat) -> () {
     try_with_context((), |cx| {
-        let location = cx.uniforms.get_obj_nullable(location)?;
+        let location = cx.uniforms.get_active_obj_nullable(location)?;
         let value = user_array(4 * count, value);
         Ok(cx.webgl.uniform4fv(location, value, 0, 0))
     })
@@ -2634,7 +2889,7 @@ extern "system" fn uniform4fv(location: GLint, count: GLsizei, value: *const GLf
 #[unwind_aborts]
 extern "system" fn uniform4i(location: GLint, v0: GLint, v1: GLint, v2: GLint, v3: GLint) -> () {
     try_with_context((), |cx| {
-        let location = cx.uniforms.get_obj_nullable(location)?;
+        let location = cx.uniforms.get_active_obj_nullable(location)?;
         Ok(cx.webgl.uniform4i(location, v0, v1, v2, v3))
     })
 }
@@ -2642,7 +2897,7 @@ extern "system" fn uniform4i(location: GLint, v0: GLint, v1: GLint, v2: GLint, v
 #[unwind_aborts]
 extern "system" fn uniform4iv(location: GLint, count: GLsizei, value: *const GLint) -> () {
     try_with_context((), |cx| {
-        let location = cx.uniforms.get_obj_nullable(location)?;
+        let location = cx.uniforms.get_active_obj_nullable(location)?;
         let value = user_array(4 * count, value);
         Ok(cx.webgl.uniform4iv(location, value, 0, 0))
     })
@@ -2657,7 +2912,7 @@ extern "system" fn uniform4ui(
     v3: GLuint,
 ) -> () {
     try_with_context((), |cx| {
-        let location = cx.uniforms.get_obj_nullable(location)?;
+        let location = cx.uniforms.get_active_obj_nullable(location)?;
         Ok(cx.webgl.uniform4ui(location, v0, v1, v2, v3))
     })
 }
@@ -2665,7 +2920,7 @@ extern "system" fn uniform4ui(
 #[unwind_aborts]
 extern "system" fn uniform4uiv(location: GLint, count: GLsizei, value: *const GLuint) -> () {
     try_with_context((), |cx| {
-        let location = cx.uniforms.get_obj_nullable(location)?;
+        let location = cx.uniforms.get_active_obj_nullable(location)?;
         let value = user_array(4 * count, value);
         Ok(cx.webgl.uniform4uiv(location, value, 0, 0))
     })
@@ -2693,7 +2948,7 @@ extern "system" fn uniform_matrix2fv(
     value: *const GLfloat,
 ) -> () {
     try_with_context((), |cx| {
-        let location = cx.uniforms.get_obj_nullable(location)?;
+        let location = cx.uniforms.get_active_obj_nullable(location)?;
         let transpose = webgl_boolean(transpose);
         let value = user_array(2 * 2 * count, value);
         Ok(cx.webgl.uniform_matrix2fv(location, transpose, value, 0, 0))
@@ -2708,7 +2963,7 @@ extern "system" fn uniform_matrix2x3fv(
     value: *const GLfloat,
 ) -> () {
     try_with_context((), |cx| {
-        let location = cx.uniforms.get_obj_nullable(location)?;
+        let location = cx.uniforms.get_active_obj_nullable(location)?;
         let transpose = webgl_boolean(transpose);
         let value = user_array(2 * 3 * count, value);
         Ok(cx
@@ -2725,7 +2980,7 @@ extern "system" fn uniform_matrix2x4fv(
     value: *const GLfloat,
 ) -> () {
     try_with_context((), |cx| {
-        let location = cx.uniforms.get_obj_nullable(location)?;
+        let location = cx.uniforms.get_active_obj_nullable(location)?;
         let transpose = webgl_boolean(transpose);
         let value = user_array(2 * 4 * count, value);
         Ok(cx
@@ -2742,7 +2997,7 @@ extern "system" fn uniform_matrix3fv(
     value: *const GLfloat,
 ) -> () {
     try_with_context((), |cx| {
-        let location = cx.uniforms.get_obj_nullable(location)?;
+        let location = cx.uniforms.get_active_obj_nullable(location)?;
         let transpose = webgl_boolean(transpose);
         let value = user_array(3 * 3 * count, value);
         Ok(cx.webgl.uniform_matrix3fv(location, transpose, value, 0, 0))
@@ -2757,7 +3012,7 @@ extern "system" fn uniform_matrix3x2fv(
     value: *const GLfloat,
 ) -> () {
     try_with_context((), |cx| {
-        let location = cx.uniforms.get_obj_nullable(location)?;
+        let location = cx.uniforms.get_active_obj_nullable(location)?;
         let transpose = webgl_boolean(transpose);
         let value = user_array(3 * 2 * count, value);
         Ok(cx
@@ -2774,7 +3029,7 @@ extern "system" fn uniform_matrix3x4fv(
     value: *const GLfloat,
 ) -> () {
     try_with_context((), |cx| {
-        let location = cx.uniforms.get_obj_nullable(location)?;
+        let location = cx.uniforms.get_active_obj_nullable(location)?;
         let transpose = webgl_boolean(transpose);
         let value = user_array(3 * 4 * count, value);
         Ok(cx
@@ -2791,7 +3046,7 @@ extern "system" fn uniform_matrix4fv(
     value: *const GLfloat,
 ) -> () {
     try_with_context((), |cx| {
-        let location = cx.uniforms.get_obj_nullable(location)?;
+        let location = cx.uniforms.get_active_obj_nullable(location)?;
         let transpose = webgl_boolean(transpose);
         let value = user_array(4 * 4 * count, value);
         Ok(cx.webgl.uniform_matrix4fv(location, transpose, value, 0, 0))
@@ -2806,7 +3061,7 @@ extern "system" fn uniform_matrix4x2fv(
     value: *const GLfloat,
 ) -> () {
     try_with_context((), |cx| {
-        let location = cx.uniforms.get_obj_nullable(location)?;
+        let location = cx.uniforms.get_active_obj_nullable(location)?;
         let transpose = webgl_boolean(transpose);
         let value = user_array(4 * 2 * count, value);
         Ok(cx
@@ -2823,7 +3078,7 @@ extern "system" fn uniform_matrix4x3fv(
     value: *const GLfloat,
 ) -> () {
     try_with_context((), |cx| {
-        let location = cx.uniforms.get_obj_nullable(location)?;
+        let location = cx.uniforms.get_active_obj_nullable(location)?;
         let transpose = webgl_boolean(transpose);
         let value = user_array(4 * 3 * count, value);
         Ok(cx
