@@ -8,8 +8,8 @@ use gl::types::*;
 use unwind_aborts::unwind_aborts;
 use webgl_stdweb as webgl;
 use webgl_stdweb::{
-    GLContext, WebGLBuffer, WebGLFramebuffer, WebGLProgram, WebGLQuery, WebGLRenderbuffer,
-    WebGLSampler, WebGLShader, WebGLSync, WebGLTexture, WebGLTransformFeedback,
+    GLContext, WebGLActiveInfo, WebGLBuffer, WebGLFramebuffer, WebGLProgram, WebGLQuery,
+    WebGLRenderbuffer, WebGLSampler, WebGLShader, WebGLSync, WebGLTexture, WebGLTransformFeedback,
     WebGLVertexArrayObject,
 };
 
@@ -49,6 +49,18 @@ impl<T> ObjectMap<T> {
             .map(Option::as_ref)
             .flatten()
             .ok_or(gl::INVALID_VALUE)
+    }
+
+    fn find(&mut self, obj: T) -> GLuint
+    where
+        T: AsRef<stdweb::Reference>,
+    {
+        for (id, slot) in self.objects.iter_mut().enumerate().skip(1) {
+            if slot.as_ref().map(AsRef::as_ref) == Some(obj.as_ref()) {
+                return id as GLuint;
+            }
+        }
+        self.add(Some(obj))
     }
 
     fn get_nullable(&self, id: GLuint) -> Result<Option<&T>, GLenum> {
@@ -92,6 +104,15 @@ impl<T> ObjectMap<T> {
 enum ProgramOrShader {
     Program(WebGLProgram),
     Shader(WebGLShader),
+}
+
+impl AsRef<stdweb::Reference> for ProgramOrShader {
+    fn as_ref(&self) -> &stdweb::Reference {
+        match self {
+            ProgramOrShader::Program(program) => program.as_ref(),
+            ProgramOrShader::Shader(shader) => shader.as_ref(),
+        }
+    }
 }
 
 impl ProgramOrShader {
@@ -186,6 +207,55 @@ fn gl_boolean(v: webgl::GLboolean) -> GLboolean {
 
 fn user_str<'a>(data: *const GLchar) -> Result<&'a str, GLenum> {
     unsafe { CStr::from_ptr(data).to_str().ok().ok_or(gl::INVALID_VALUE) }
+}
+
+fn user_mut<'a, T>(data: *mut T) -> &'a mut T {
+    unsafe { &mut *data }
+}
+
+fn user_nullable_mut<'a, T>(data: *mut T) -> Option<&'a mut T> {
+    unsafe { data.as_mut() }
+}
+
+fn unpack_str(dst_len: GLsizei, len_out: *mut GLsizei, dst: *mut GLchar, src: &str) {
+    let len_out = user_nullable_mut(len_out);
+    let dst = user_array_mut(dst_len, dst as *mut u8);
+    let src = src.as_bytes();
+
+    let copy_len = src.len().min(dst.len() - 1);
+    dst[..copy_len].copy_from_slice(&src[..copy_len]);
+    dst[copy_len] = b'\0';
+
+    if let Some(len_out) = len_out {
+        *len_out = copy_len as GLsizei;
+    }
+}
+
+fn unpack_array<T: Copy>(dst_len: GLsizei, len_out: *mut GLsizei, dst: *mut T, src: &[T]) {
+    let len_out = user_nullable_mut(len_out);
+    let dst = user_array_mut(dst_len, dst);
+
+    let copy_len = src.len().min(dst.len());
+    dst[..copy_len].copy_from_slice(&src[..copy_len]);
+
+    if let Some(len_out) = len_out {
+        *len_out = copy_len as GLsizei;
+    }
+}
+fn unpack_active_info(
+    buf_size: GLsizei,
+    length: *mut GLsizei,
+    size: *mut GLint,
+    type_: *mut GLenum,
+    name: *mut GLchar,
+    info_src: WebGLActiveInfo,
+) -> () {
+    let size = user_mut(size);
+    let type_ = user_mut(type_);
+
+    unpack_str(buf_size, length, name, &info_src.name());
+    *size = info_src.size();
+    *type_ = info_src.type_();
 }
 
 pub fn get_proc_address(name: &str) -> *const c_void {
@@ -1327,7 +1397,13 @@ extern "system" fn get_active_attrib(
     type_: *mut GLenum,
     name: *mut GLchar,
 ) -> () {
-    todo!()
+    try_with_context((), |cx| {
+        let program = cx.shaders.get(program)?.as_program()?;
+        if let Some(info) = cx.webgl.get_active_attrib(program, index) {
+            unpack_active_info(buf_size, length, size, type_, name, info);
+        }
+        Ok(())
+    })
 }
 
 #[unwind_aborts]
@@ -1340,7 +1416,13 @@ extern "system" fn get_active_uniform(
     type_: *mut GLenum,
     name: *mut GLchar,
 ) -> () {
-    todo!()
+    try_with_context((), |cx| {
+        let program = cx.shaders.get(program)?.as_program()?;
+        if let Some(info) = cx.webgl.get_active_uniform(program, index) {
+            unpack_active_info(buf_size, length, size, type_, name, info);
+        }
+        Ok(())
+    })
 }
 
 #[unwind_aborts]
@@ -1351,7 +1433,16 @@ extern "system" fn get_active_uniform_block_name(
     length: *mut GLsizei,
     uniform_block_name: *mut GLchar,
 ) -> () {
-    todo!()
+    try_with_context((), |cx| {
+        let program = cx.shaders.get(program)?.as_program()?;
+        if let Some(name) = cx
+            .webgl
+            .get_active_uniform_block_name(program, uniform_block_index)
+        {
+            unpack_str(buf_size, length, uniform_block_name, &name)
+        }
+        Ok(())
+    })
 }
 
 #[unwind_aborts]
@@ -1382,7 +1473,17 @@ extern "system" fn get_attached_shaders(
     count: *mut GLsizei,
     shaders: *mut GLuint,
 ) -> () {
-    todo!()
+    try_with_context((), |cx| {
+        let program = cx.shaders.get(program)?.as_program()?;
+        if let Some(shader_objs) = cx.webgl.get_attached_shaders(program) {
+            let shader_ids: Vec<_> = shader_objs
+                .into_iter()
+                .map(|obj| cx.shaders.find(ProgramOrShader::Shader(obj)))
+                .collect();
+            unpack_array(max_count, count, shaders, &shader_ids);
+        }
+        Ok(())
+    })
 }
 
 #[unwind_aborts]
@@ -1506,7 +1607,13 @@ extern "system" fn get_program_info_log(
     length: *mut GLsizei,
     info_log: *mut GLchar,
 ) -> () {
-    todo!()
+    try_with_context((), |cx| {
+        let program = cx.shaders.get(program)?.as_program()?;
+        if let Some(log_src) = cx.webgl.get_program_info_log(program) {
+            unpack_str(buf_size, length, info_log, &log_src);
+        }
+        Ok(())
+    })
 }
 
 #[unwind_aborts]
@@ -1558,7 +1665,13 @@ extern "system" fn get_shader_info_log(
     length: *mut GLsizei,
     info_log: *mut GLchar,
 ) -> () {
-    todo!()
+    try_with_context((), |cx| {
+        let shader = cx.shaders.get(shader)?.as_shader()?;
+        if let Some(log_src) = cx.webgl.get_shader_info_log(shader) {
+            unpack_str(buf_size, length, info_log, &log_src);
+        }
+        Ok(())
+    })
 }
 
 #[unwind_aborts]
@@ -1568,7 +1681,18 @@ extern "system" fn get_shader_precision_format(
     range: *mut GLint,
     precision: *mut GLint,
 ) -> () {
-    todo!()
+    with_context(|cx| {
+        let range = user_array_mut(2, range);
+        let precision = user_mut(precision);
+        if let Some(format) = cx
+            .webgl
+            .get_shader_precision_format(shadertype, precisiontype)
+        {
+            range[0] = format.range_min();
+            range[1] = format.range_max();
+            *precision = format.precision();
+        }
+    })
 }
 
 #[unwind_aborts]
@@ -1578,7 +1702,13 @@ extern "system" fn get_shader_source(
     length: *mut GLsizei,
     source: *mut GLchar,
 ) -> () {
-    todo!()
+    try_with_context((), |cx| {
+        let shader = cx.shaders.get(shader)?.as_shader()?;
+        if let Some(source_src) = cx.webgl.get_shader_source(shader) {
+            unpack_str(buf_size, length, source, &source_src);
+        }
+        Ok(())
+    })
 }
 
 #[unwind_aborts]
@@ -1627,7 +1757,13 @@ extern "system" fn get_transform_feedback_varying(
     type_: *mut GLenum,
     name: *mut GLchar,
 ) -> () {
-    todo!()
+    try_with_context((), |cx| {
+        let program = cx.shaders.get(program)?.as_program()?;
+        if let Some(info) = cx.webgl.get_transform_feedback_varying(program, index) {
+            unpack_active_info(buf_size, length, size, type_, name, info);
+        }
+        Ok(())
+    })
 }
 
 #[unwind_aborts]
@@ -1649,7 +1785,20 @@ extern "system" fn get_uniform_indices(
     uniform_names: *const *const GLchar,
     uniform_indices: *mut GLuint,
 ) -> () {
-    todo!()
+    try_with_context((), |cx| {
+        let program = cx.shaders.get(program)?.as_program()?;
+        let uniform_names: Vec<_> = user_array(uniform_count, uniform_names)
+            .iter()
+            .copied()
+            .map(user_str)
+            .collect::<Result<_, _>>()?;
+        let uniform_indices = user_array_mut(uniform_count, uniform_indices);
+
+        if let Some(indices_src) = cx.webgl.get_uniform_indices(program, &uniform_names) {
+            uniform_indices.copy_from_slice(&indices_src);
+        }
+        Ok(())
+    })
 }
 
 #[unwind_aborts]
@@ -1812,7 +1961,12 @@ extern "system" fn is_shader(shader: GLuint) -> GLboolean {
 
 #[unwind_aborts]
 extern "system" fn is_sync(sync: GLsync) -> GLboolean {
-    todo!()
+    with_context(|cx| {
+        cx.syncs
+            .get_nullable(sync as GLuint)
+            .map(|sync| gl_boolean(cx.webgl.is_sync(sync)))
+            .unwrap_or(gl::FALSE)
+    })
 }
 
 #[unwind_aborts]

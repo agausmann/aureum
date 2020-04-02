@@ -8,5 +8,6 @@ edition = "2018"
 
 [dependencies]
 gl = "0.14.0"
+stdweb = "0.4.20"
 unwind_aborts = "0.1.1"
 webgl_stdweb = "0.3.0"
