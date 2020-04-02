@@ -37,8 +37,8 @@ struct ObjectMap<T> {
 }
 
 impl<T> ObjectMap<T> {
-    fn new() -> ObjectMap<T> {
-        ObjectMap {
+    fn new() -> Self {
+        Self {
             objects: vec![None],
         }
     }
@@ -51,6 +51,14 @@ impl<T> ObjectMap<T> {
             .ok_or(gl::INVALID_VALUE)
     }
 
+    fn get_nullable(&self, id: GLuint) -> Result<Option<&T>, GLenum> {
+        if id == 0 {
+            Ok(None)
+        } else {
+            self.get(id).map(Some)
+        }
+    }
+
     fn find(&mut self, obj: T) -> GLuint
     where
         T: AsRef<stdweb::Reference>,
@@ -61,14 +69,6 @@ impl<T> ObjectMap<T> {
             }
         }
         self.add(Some(obj))
-    }
-
-    fn get_nullable(&self, id: GLuint) -> Result<Option<&T>, GLenum> {
-        if id == 0 {
-            Ok(None)
-        } else {
-            self.get(id).map(Some)
-        }
     }
 
     fn add(&mut self, obj: Option<T>) -> GLuint {
@@ -109,8 +109,8 @@ enum ProgramOrShader {
 impl AsRef<stdweb::Reference> for ProgramOrShader {
     fn as_ref(&self) -> &stdweb::Reference {
         match self {
-            ProgramOrShader::Program(program) => program.as_ref(),
-            ProgramOrShader::Shader(shader) => shader.as_ref(),
+            Self::Program(program) => program.as_ref(),
+            Self::Shader(shader) => shader.as_ref(),
         }
     }
 }
@@ -118,28 +118,28 @@ impl AsRef<stdweb::Reference> for ProgramOrShader {
 impl ProgramOrShader {
     fn as_program(&self) -> Result<&WebGLProgram, GLenum> {
         match self {
-            ProgramOrShader::Program(program) => Ok(program),
+            Self::Program(program) => Ok(program),
             _ => Err(gl::INVALID_OPERATION),
         }
     }
 
     fn as_shader(&self) -> Result<&WebGLShader, GLenum> {
         match self {
-            ProgramOrShader::Shader(shader) => Ok(shader),
+            Self::Shader(shader) => Ok(shader),
             _ => Err(gl::INVALID_OPERATION),
         }
     }
 
     fn to_program(self) -> Result<WebGLProgram, GLenum> {
         match self {
-            ProgramOrShader::Program(program) => Ok(program),
+            Self::Program(program) => Ok(program),
             _ => Err(gl::INVALID_OPERATION),
         }
     }
 
     fn to_shader(self) -> Result<WebGLShader, GLenum> {
         match self {
-            ProgramOrShader::Shader(shader) => Ok(shader),
+            Self::Shader(shader) => Ok(shader),
             _ => Err(gl::INVALID_OPERATION),
         }
     }
