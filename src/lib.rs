@@ -5,6 +5,7 @@ use std::rc::Rc;
 use std::{fmt, mem, ptr, slice, str};
 
 use gl::types::*;
+use stdweb::unstable::TryInto;
 use stdweb::{Reference, Value};
 use unwind_aborts::unwind_aborts;
 use ustr::ustr;
@@ -24,6 +25,7 @@ impl Context {
     pub fn new(webgl: GLContext) -> Self {
         Self {
             inner: Rc::new(RefCell::new(ContextInner {
+                element_array_buffer: webgl.create_buffer().expect("unable to create buffer"),
                 webgl,
                 error_code: gl::NO_ERROR,
                 shaders: ObjectMap::new(),
@@ -60,6 +62,7 @@ impl Eq for Context {}
 
 struct ContextInner {
     webgl: GLContext,
+    element_array_buffer: WebGLBuffer,
     error_code: GLenum,
     shaders: ObjectMap<ProgramOrShader>,
     buffers: ObjectMap<WebGLBuffer>,
@@ -72,6 +75,32 @@ struct ContextInner {
     transform_feedbacks: ObjectMap<WebGLTransformFeedback>,
     vertex_arrays: ObjectMap<WebGLVertexArrayObject>,
     uniforms: UniformMap,
+}
+
+impl ContextInner {
+    fn with_element_array_buffer<F, R>(&mut self, data: &[u8], func: F) -> R
+    where
+        F: FnOnce(&mut ContextInner) -> R,
+    {
+        // set up buffer
+        let prev_buffer: Option<WebGLBuffer> = self
+            .webgl
+            .get_parameter(gl::ELEMENT_ARRAY_BUFFER_BINDING)
+            .try_into()
+            .unwrap();
+        self.webgl
+            .bind_buffer(gl::ELEMENT_ARRAY_BUFFER, Some(&self.element_array_buffer));
+        self.webgl
+            .buffer_data_2(gl::ELEMENT_ARRAY_BUFFER, data, gl::STREAM_DRAW, 0, 0);
+
+        let result = func(self);
+
+        // restore buffer
+        self.webgl
+            .bind_buffer(gl::ELEMENT_ARRAY_BUFFER, prev_buffer.as_ref());
+
+        result
+    }
 }
 
 struct ObjectMap<T> {
@@ -500,6 +529,16 @@ fn cache_string(value: Value) -> *const GLubyte {
     } else {
         ptr::null()
     }
+}
+
+fn element_index_buffer<'a>(count: GLsizei, type_: GLenum, indices: *const c_void) -> &'a [u8] {
+    let element_size = match type_ {
+        gl::UNSIGNED_BYTE => mem::size_of::<GLubyte>(),
+        gl::UNSIGNED_SHORT => mem::size_of::<GLushort>(),
+        gl::UNSIGNED_INT => mem::size_of::<GLuint>(),
+        _ => return &[],
+    };
+    user_array(count * element_size as GLsizei, indices as *const _)
 }
 
 pub fn get_proc_address(name: &str) -> *const c_void {
@@ -1424,7 +1463,12 @@ extern "system" fn draw_elements(
     type_: GLenum,
     indices: *const c_void,
 ) -> () {
-    todo!()
+    with_context(|cx| {
+        let indices = element_index_buffer(count, type_, indices);
+        cx.with_element_array_buffer(indices, |cx| {
+            cx.webgl.draw_elements(mode, count, type_, 0);
+        })
+    })
 }
 
 #[unwind_aborts]
@@ -1435,7 +1479,13 @@ extern "system" fn draw_elements_instanced(
     indices: *const c_void,
     instancecount: GLsizei,
 ) -> () {
-    todo!()
+    with_context(|cx| {
+        let indices = element_index_buffer(count, type_, indices);
+        cx.with_element_array_buffer(indices, |cx| {
+            cx.webgl
+                .draw_elements_instanced(mode, count, type_, 0, instancecount);
+        })
+    })
 }
 
 #[unwind_aborts]
@@ -1447,7 +1497,13 @@ extern "system" fn draw_range_elements(
     type_: GLenum,
     indices: *const c_void,
 ) -> () {
-    todo!()
+    with_context(|cx| {
+        let indices = element_index_buffer(count, type_, indices);
+        cx.with_element_array_buffer(indices, |cx| {
+            cx.webgl
+                .draw_range_elements(mode, start, end, count, type_, 0);
+        })
+    })
 }
 
 #[unwind_aborts]
@@ -1487,11 +1543,11 @@ extern "system" fn flush() -> () {
 
 #[unwind_aborts]
 extern "system" fn flush_mapped_buffer_range(
-    target: GLenum,
-    offset: GLintptr,
-    length: GLsizeiptr,
+    _target: GLenum,
+    _offset: GLintptr,
+    _length: GLsizeiptr,
 ) -> () {
-    todo!()
+    unimplemented!("client-side buffers are not fully supported");
 }
 
 #[unwind_aborts]
@@ -1786,11 +1842,11 @@ extern "system" fn get_buffer_parameteriv(target: GLenum, pname: GLenum, params:
 
 #[unwind_aborts]
 extern "system" fn get_buffer_pointerv(
-    target: GLenum,
-    pname: GLenum,
-    params: *const *mut c_void,
+    _target: GLenum,
+    _pname: GLenum,
+    _params: *const *mut c_void,
 ) -> () {
-    todo!()
+    unimplemented!("client-side buffers are not fully supported");
 }
 
 #[unwind_aborts]
@@ -1886,13 +1942,13 @@ extern "system" fn get_internalformativ(
 
 #[unwind_aborts]
 extern "system" fn get_program_binary(
-    program: GLuint,
-    buf_size: GLsizei,
-    length: *mut GLsizei,
-    binary_format: *mut GLenum,
-    binary: *mut c_void,
+    _program: GLuint,
+    _buf_size: GLsizei,
+    _length: *mut GLsizei,
+    _binary_format: *mut GLenum,
+    _binary: *mut c_void,
 ) -> () {
-    todo!()
+    unimplemented!("shader binaries are not supported")
 }
 
 #[unwind_aborts]
@@ -2206,11 +2262,11 @@ extern "system" fn get_vertex_attrib_iuiv(index: GLuint, pname: GLenum, params: 
 
 #[unwind_aborts]
 extern "system" fn get_vertex_attrib_pointerv(
-    index: GLuint,
-    pname: GLenum,
-    pointer: *const *mut c_void,
+    _index: GLuint,
+    _pname: GLenum,
+    _pointer: *const *mut c_void,
 ) -> () {
-    todo!()
+    unimplemented!("client-side buffers are not fully supported");
 }
 
 #[unwind_aborts]
@@ -2393,12 +2449,12 @@ extern "system" fn link_program(program: GLuint) -> () {
 
 #[unwind_aborts]
 extern "system" fn map_buffer_range(
-    target: GLenum,
-    offset: GLintptr,
-    length: GLsizeiptr,
-    access: GLbitfield,
+    _target: GLenum,
+    _offset: GLintptr,
+    _length: GLsizeiptr,
+    _access: GLbitfield,
 ) -> *mut c_void {
-    todo!()
+    unimplemented!("client-side buffers are not fully supported");
 }
 
 #[unwind_aborts]
@@ -2418,17 +2474,17 @@ extern "system" fn polygon_offset(factor: GLfloat, units: GLfloat) -> () {
 
 #[unwind_aborts]
 extern "system" fn program_binary(
-    program: GLuint,
-    binary_format: GLenum,
-    binary: *const c_void,
-    length: GLsizei,
+    _program: GLuint,
+    _binary_format: GLenum,
+    _binary: *const c_void,
+    _length: GLsizei,
 ) -> () {
-    todo!()
+    unimplemented!("shader binaries are not supported")
 }
 
 #[unwind_aborts]
-extern "system" fn program_parameteri(program: GLuint, pname: GLenum, value: GLint) -> () {
-    todo!()
+extern "system" fn program_parameteri(_program: GLuint, _pname: GLenum, _value: GLint) -> () {
+    unimplemented!("shader binaries are not supported")
 }
 
 #[unwind_aborts]
@@ -2451,7 +2507,7 @@ extern "system" fn read_pixels(
 
 #[unwind_aborts]
 extern "system" fn release_shader_compiler() -> () {
-    todo!()
+    unimplemented!("shader binaries are not supported")
 }
 
 #[unwind_aborts]
@@ -2531,13 +2587,13 @@ extern "system" fn scissor(x: GLint, y: GLint, width: GLsizei, height: GLsizei) 
 
 #[unwind_aborts]
 extern "system" fn shader_binary(
-    count: GLsizei,
-    shaders: *const GLuint,
-    binaryformat: GLenum,
-    binary: *const c_void,
-    length: GLsizei,
+    _count: GLsizei,
+    _shaders: *const GLuint,
+    _binaryformat: GLenum,
+    _binary: *const c_void,
+    _length: GLsizei,
 ) -> () {
-    todo!()
+    unimplemented!("shader binaries are not supported")
 }
 
 #[unwind_aborts]
@@ -3127,8 +3183,8 @@ extern "system" fn uniform_matrix4x3fv(
 }
 
 #[unwind_aborts]
-extern "system" fn unmap_buffer(target: GLenum) -> GLboolean {
-    todo!()
+extern "system" fn unmap_buffer(_target: GLenum) -> GLboolean {
+    unimplemented!("client-side buffers are not fully supported");
 }
 
 #[unwind_aborts]
@@ -3248,7 +3304,13 @@ extern "system" fn vertex_attrib_i_pointer(
     stride: GLsizei,
     pointer: *const c_void,
 ) -> () {
-    todo!()
+    with_context(|cx| {
+        if pointer.is_null() {
+            unimplemented!("client-side buffers are not fully supported");
+        }
+        cx.webgl
+            .vertex_attrib_i_pointer(index, size, type_, stride, 0);
+    })
 }
 
 #[unwind_aborts]
@@ -3260,7 +3322,14 @@ extern "system" fn vertex_attrib_pointer(
     stride: GLsizei,
     pointer: *const c_void,
 ) -> () {
-    todo!()
+    with_context(|cx| {
+        if pointer.is_null() {
+            unimplemented!("client-side buffers are not fully supported");
+        }
+        let normalized = webgl_boolean(normalized);
+        cx.webgl
+            .vertex_attrib_pointer(index, size, type_, normalized, stride, 0);
+    })
 }
 
 #[unwind_aborts]
