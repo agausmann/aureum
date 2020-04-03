@@ -2,7 +2,7 @@ use std::cell::{Ref, RefCell};
 use std::ffi::CStr;
 use std::os::raw::*;
 use std::rc::Rc;
-use std::{mem, ptr, slice, str};
+use std::{fmt, mem, ptr, slice, str};
 
 use gl::types::*;
 use stdweb::{Reference, Value};
@@ -15,9 +15,48 @@ use webgl_stdweb::{
     WebGLUniformLocation, WebGLVertexArrayObject,
 };
 
+#[derive(Clone)]
 pub struct Context {
     inner: Rc<RefCell<ContextInner>>,
 }
+
+impl Context {
+    pub fn new(webgl: GLContext) -> Self {
+        Self {
+            inner: Rc::new(RefCell::new(ContextInner {
+                webgl,
+                error_code: gl::NO_ERROR,
+                shaders: ObjectMap::new(),
+                buffers: ObjectMap::new(),
+                framebuffers: ObjectMap::new(),
+                queries: ObjectMap::new(),
+                renderbuffers: ObjectMap::new(),
+                samplers: ObjectMap::new(),
+                syncs: ObjectMap::new(),
+                textures: ObjectMap::new(),
+                transform_feedbacks: ObjectMap::new(),
+                vertex_arrays: ObjectMap::new(),
+                uniforms: UniformMap::new(),
+            })),
+        }
+    }
+}
+
+impl fmt::Debug for Context {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        f.debug_tuple("Context")
+            .field(&format_args!("{:p}", self.inner))
+            .finish()
+    }
+}
+
+impl PartialEq for Context {
+    fn eq(&self, other: &Self) -> bool {
+        Rc::ptr_eq(&self.inner, &other.inner)
+    }
+}
+
+impl Eq for Context {}
 
 struct ContextInner {
     webgl: GLContext,
