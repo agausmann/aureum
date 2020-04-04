@@ -63,8 +63,8 @@ fn load_shader(shader_src: &CStr, type_: GLenum) -> GLuint {
 
 fn init() -> Option<UserData> {
     unsafe {
-        let v_shader_str = CString::new(&include_bytes!("v.glsl")[..]).unwrap();
-        let f_shader_str = CString::new(&include_bytes!("f.glsl")[..]).unwrap();
+        let v_shader_str = CString::new(&include_bytes!("vertex.glsl")[..]).unwrap();
+        let f_shader_str = CString::new(&include_bytes!("fragment.glsl")[..]).unwrap();
 
         // Load the vertex/fragment shaders
         let vertex_shader = load_shader(&v_shader_str, gl::VERTEX_SHADER);
