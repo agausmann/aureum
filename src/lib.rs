@@ -1,13 +1,13 @@
 use std::cell::{Ref, RefCell};
-use std::ffi::CStr;
+use std::ffi::{CStr, CString};
 use std::os::raw::*;
 use std::rc::Rc;
 use std::{fmt, mem, ptr, slice, str};
+use std::collections::HashSet;
 
 use gl::types::*;
 use stdweb::{Reference, Value};
 use unwind_aborts::unwind_aborts;
-use ustr::ustr;
 use webgl_stdweb as webgl;
 use webgl_stdweb::{
     GLContext, WebGLActiveInfo, WebGLBuffer, WebGLFramebuffer, WebGLProgram, WebGLQuery,
@@ -118,8 +118,8 @@ impl<T> ObjectMap<T> {
             for (id, slot) in self.objects.iter_mut().enumerate().skip(1) {
                 if slot.is_none() {
                     *slot = obj;
+                    return id as GLuint;
                 }
-                return id as GLuint;
             }
             let id = self.objects.len();
             self.objects.push(obj);
@@ -528,9 +528,20 @@ fn unpack_parameter_bounded<T: Parameter>(
     }
 }
 
+thread_local! {
+    static STRING_CACHE: RefCell<HashSet<CString>> = RefCell::new(HashSet::new());
+}
+
 fn cache_string(value: Value) -> *const GLubyte {
     if let Some(s) = value.as_str() {
-        unsafe { ustr(s).as_char_ptr() as *const _ }
+        STRING_CACHE.with(|cell| {
+            let mut cache = cell.borrow_mut();
+            let c_string = CString::new(s).unwrap();
+            if !cache.contains(&c_string) {
+                cache.insert(c_string.clone());
+            }
+            cache.get(&c_string).unwrap().as_ptr() as *const _
+        })
     } else {
         ptr::null()
     }
@@ -1984,7 +1995,12 @@ extern "system" fn get_program_info_log(
 extern "system" fn get_programiv(program: GLuint, pname: GLenum, params: *mut GLint) -> () {
     try_with_context((), |cx| {
         let program = cx.shaders.get(program)?.as_program()?;
-        let value = cx.webgl.get_program_parameter(program, pname);
+        let value = match pname {
+            gl::INFO_LOG_LENGTH => {
+                ((cx.webgl.get_program_info_log(program).unwrap().len() + 1) as u32).into()
+            }
+            _ => cx.webgl.get_program_parameter(program, pname)
+        };
         unpack_parameter(cx, pname, params, value);
         Ok(())
     })
@@ -2111,7 +2127,15 @@ extern "system" fn get_shader_source(
 extern "system" fn get_shaderiv(shader: GLuint, pname: GLenum, params: *mut GLint) -> () {
     try_with_context((), |cx| {
         let shader = cx.shaders.get(shader)?.as_shader()?;
-        let value = cx.webgl.get_shader_parameter(shader, pname);
+        let value = match pname {
+            gl::INFO_LOG_LENGTH => {
+                (cx.webgl.get_shader_info_log(shader).map(|s| s.len() + 1).unwrap_or(0) as u32).into()
+            }
+            gl::SHADER_SOURCE_LENGTH => {
+                (cx.webgl.get_shader_source(shader).map(|s| s.len() + 1).unwrap_or(0) as u32).into()
+            }
+            _ => cx.webgl.get_shader_parameter(shader, pname)
+        };
         unpack_parameter(cx, pname, params, value);
         Ok(())
     })
