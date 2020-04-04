@@ -265,6 +265,14 @@ thread_local! {
     static CURRENT_CONTEXT: RefCell<Option<Context>> = RefCell::new(None);
 }
 
+pub fn is_current(context: Option<&Context>) -> bool {
+    CURRENT_CONTEXT.with(|cell| cell.borrow().as_ref() == context)
+}
+
+pub fn make_current(context: Option<Context>) -> Option<Context> {
+    CURRENT_CONTEXT.with(|cell| mem::replace(&mut *cell.borrow_mut(), context))
+}
+
 fn with_context<F, R>(func: F) -> R
 where
     F: FnOnce(&mut ContextInner) -> R,
