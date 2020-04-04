@@ -1,9 +1,9 @@
 use std::cell::{Ref, RefCell};
+use std::collections::HashSet;
 use std::ffi::{CStr, CString};
 use std::os::raw::*;
 use std::rc::Rc;
 use std::{fmt, mem, ptr, slice, str};
-use std::collections::HashSet;
 
 use gl::types::*;
 use stdweb::{Reference, Value};
@@ -1999,7 +1999,7 @@ extern "system" fn get_programiv(program: GLuint, pname: GLenum, params: *mut GL
             gl::INFO_LOG_LENGTH => {
                 ((cx.webgl.get_program_info_log(program).unwrap().len() + 1) as u32).into()
             }
-            _ => cx.webgl.get_program_parameter(program, pname)
+            _ => cx.webgl.get_program_parameter(program, pname),
         };
         unpack_parameter(cx, pname, params, value);
         Ok(())
@@ -2128,13 +2128,19 @@ extern "system" fn get_shaderiv(shader: GLuint, pname: GLenum, params: *mut GLin
     try_with_context((), |cx| {
         let shader = cx.shaders.get(shader)?.as_shader()?;
         let value = match pname {
-            gl::INFO_LOG_LENGTH => {
-                (cx.webgl.get_shader_info_log(shader).map(|s| s.len() + 1).unwrap_or(0) as u32).into()
-            }
-            gl::SHADER_SOURCE_LENGTH => {
-                (cx.webgl.get_shader_source(shader).map(|s| s.len() + 1).unwrap_or(0) as u32).into()
-            }
-            _ => cx.webgl.get_shader_parameter(shader, pname)
+            gl::INFO_LOG_LENGTH => (cx
+                .webgl
+                .get_shader_info_log(shader)
+                .map(|s| s.len() + 1)
+                .unwrap_or(0) as u32)
+                .into(),
+            gl::SHADER_SOURCE_LENGTH => (cx
+                .webgl
+                .get_shader_source(shader)
+                .map(|s| s.len() + 1)
+                .unwrap_or(0) as u32)
+                .into(),
+            _ => cx.webgl.get_shader_parameter(shader, pname),
         };
         unpack_parameter(cx, pname, params, value);
         Ok(())
