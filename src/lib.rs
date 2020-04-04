@@ -390,17 +390,18 @@ fn unpack_active_info(
 }
 
 trait Parameter: Sized {
-    fn from_webgl(value: Value) -> Self;
+    fn from_webgl(cx: &mut ContextInner, value: Value) -> Self;
 
-    fn from_webgl_normalized(value: Value) -> Self {
-        Self::from_webgl(value)
+    fn from_webgl_normalized(cx: &mut ContextInner, value: Value) -> Self {
+        Self::from_webgl(cx, value)
     }
 }
 
 macro_rules! impl_parameter_for_int {
     ($($ty:ty),*$(,)?) => {$(
+
         impl Parameter for $ty {
-            fn from_webgl(value: Value) -> Self {
+            fn from_webgl(cx: &mut ContextInner, value: Value) -> Self {
                 match value {
                     Value::Bool(true) => 1,
                     Value::Number(number) => {
@@ -413,18 +414,42 @@ macro_rules! impl_parameter_for_int {
                             number.round() as Self
                         }
                     }
+                    Value::Reference(ref reference) => {
+                        use stdweb::unstable::TryInto;
+
+                        if let Ok(shader) = reference.try_into() {
+                            cx.shaders.find(ProgramOrShader::Shader(shader)) as Self
+                        } else if let Ok(program) = reference.try_into() {
+                            cx.shaders.find(ProgramOrShader::Program(program)) as Self
+                        } else if let Ok(buffer) = reference.try_into() {
+                            cx.buffers.find(buffer) as Self
+                        } else if let Ok(framebuffer) = reference.try_into() {
+                            cx.framebuffers.find(framebuffer) as Self
+                        } else if let Ok(renderbuffer) = reference.try_into() {
+                            cx.renderbuffers.find(renderbuffer) as Self
+                        } else if let Ok(sampler) = reference.try_into() {
+                            cx.samplers.find(sampler) as Self
+                        } else if let Ok(texture) = reference.try_into() {
+                            cx.textures.find(texture) as Self
+                        } else if let Ok(tf) = reference.try_into() {
+                            cx.transform_feedbacks.find(tf) as Self
+                        } else if let Ok(va) = reference.try_into() {
+                            cx.vertex_arrays.find(va) as Self
+                        } else {
+                            panic!("unknown reference type")
+                        }
+                    }
                     _ => 0,
                 }
             }
 
-            fn from_webgl_normalized(value: Value) -> Self {
+            fn from_webgl_normalized(cx: &mut ContextInner, value: Value) -> Self {
                 match value {
-                    Value::Bool(true) => 1,
                     Value::Number(number) => {
                         // Equations 2.3 and 2.4 from the GLES 3.0 spec:
                         (f64::from(number) * Self::max_value() as f64).round() as Self
                     }
-                    _ => 0,
+                    other => Self::from_webgl(cx, other),
                 }
             }
         }
@@ -434,7 +459,7 @@ macro_rules! impl_parameter_for_int {
 impl_parameter_for_int!(GLint, GLuint, GLint64);
 
 impl Parameter for GLboolean {
-    fn from_webgl(value: Value) -> Self {
+    fn from_webgl(_cx: &mut ContextInner, value: Value) -> Self {
         match value {
             Value::Bool(true) => gl::TRUE,
             Value::Number(number) if number != 0 => gl::TRUE,
@@ -444,7 +469,7 @@ impl Parameter for GLboolean {
 }
 
 impl Parameter for GLfloat {
-    fn from_webgl(value: Value) -> Self {
+    fn from_webgl(_cx: &mut ContextInner, value: Value) -> Self {
         match value {
             Value::Bool(true) => 1.0,
             Value::Number(number) => f64::from(number) as GLfloat,
@@ -453,11 +478,12 @@ impl Parameter for GLfloat {
     }
 }
 
-fn unpack_parameter<T: Parameter>(pname: GLenum, dst: *mut T, src: Value) {
-    unpack_parameter_bounded(pname, GLsizei::max_value(), ptr::null_mut(), dst, src)
+fn unpack_parameter<T: Parameter>(cx: &mut ContextInner, pname: GLenum, dst: *mut T, src: Value) {
+    unpack_parameter_bounded(cx, pname, GLsizei::max_value(), ptr::null_mut(), dst, src)
 }
 
 fn unpack_parameter_bounded<T: Parameter>(
+    cx: &mut ContextInner,
     pname: GLenum,
     buf_size: GLsizei,
     dst_len: *mut GLsizei,
@@ -476,9 +502,9 @@ fn unpack_parameter_bounded<T: Parameter>(
 
         for (dst, src) in dst.iter_mut().zip(src) {
             *dst = if normalized {
-                Parameter::from_webgl_normalized(src)
+                Parameter::from_webgl_normalized(cx, src)
             } else {
-                Parameter::from_webgl(src)
+                Parameter::from_webgl(cx, src)
             };
         }
         if let Some(dst_len) = dst_len {
@@ -487,9 +513,9 @@ fn unpack_parameter_bounded<T: Parameter>(
     } else {
         let dst = user_mut(dst);
         *dst = if normalized {
-            Parameter::from_webgl_normalized(src)
+            Parameter::from_webgl_normalized(cx, src)
         } else {
-            Parameter::from_webgl(src)
+            Parameter::from_webgl(cx, src)
         }
     }
 }
@@ -1738,7 +1764,7 @@ extern "system" fn get_active_uniform_blockiv(
         let value =
             cx.webgl
                 .get_active_uniform_block_parameter(program, uniform_block_index, pname);
-        unpack_parameter(pname, params, value);
+        unpack_parameter(cx, pname, params, value);
         Ok(())
     })
 }
@@ -1757,7 +1783,7 @@ extern "system" fn get_active_uniformsiv(
         let value = cx
             .webgl
             .get_active_uniforms(program, uniform_indices, pname);
-        unpack_parameter(pname, params, value);
+        unpack_parameter(cx, pname, params, value);
         Ok(())
     })
 }
@@ -1795,7 +1821,7 @@ extern "system" fn get_attrib_location(program: GLuint, name: *const GLchar) -> 
 extern "system" fn get_booleanv(pname: GLenum, data: *mut GLboolean) -> () {
     with_context(|cx| {
         let value = cx.webgl.get_parameter(pname);
-        unpack_parameter(pname, data, value);
+        unpack_parameter(cx, pname, data, value);
     })
 }
 
@@ -1807,7 +1833,7 @@ extern "system" fn get_buffer_parameteri64v(
 ) -> () {
     with_context(|cx| {
         let value = cx.webgl.get_buffer_parameter(target, pname);
-        unpack_parameter(pname, params, value);
+        unpack_parameter(cx, pname, params, value);
     })
 }
 
@@ -1815,7 +1841,7 @@ extern "system" fn get_buffer_parameteri64v(
 extern "system" fn get_buffer_parameteriv(target: GLenum, pname: GLenum, params: *mut GLint) -> () {
     with_context(|cx| {
         let value = cx.webgl.get_buffer_parameter(target, pname);
-        unpack_parameter(pname, params, value);
+        unpack_parameter(cx, pname, params, value);
     })
 }
 
@@ -1843,7 +1869,7 @@ extern "system" fn get_error() -> GLenum {
 extern "system" fn get_floatv(pname: GLenum, data: *mut GLfloat) -> () {
     with_context(|cx| {
         let value = cx.webgl.get_parameter(pname);
-        unpack_parameter(pname, data, value);
+        unpack_parameter(cx, pname, data, value);
     })
 }
 
@@ -1867,7 +1893,7 @@ extern "system" fn get_framebuffer_attachment_parameteriv(
         let value = cx
             .webgl
             .get_framebuffer_attachment_parameter(target, attachment, pname);
-        unpack_parameter(pname, params, value);
+        unpack_parameter(cx, pname, params, value);
     })
 }
 
@@ -1875,7 +1901,7 @@ extern "system" fn get_framebuffer_attachment_parameteriv(
 extern "system" fn get_integer64i_v(target: GLenum, index: GLuint, data: *mut GLint64) -> () {
     with_context(|cx| {
         let value = cx.webgl.get_indexed_parameter(target, index);
-        unpack_parameter(target, data, value);
+        unpack_parameter(cx, target, data, value);
     })
 }
 
@@ -1883,7 +1909,7 @@ extern "system" fn get_integer64i_v(target: GLenum, index: GLuint, data: *mut GL
 extern "system" fn get_integer64v(pname: GLenum, data: *mut GLint64) -> () {
     with_context(|cx| {
         let value = cx.webgl.get_parameter(pname);
-        unpack_parameter(pname, data, value);
+        unpack_parameter(cx, pname, data, value);
     })
 }
 
@@ -1891,7 +1917,7 @@ extern "system" fn get_integer64v(pname: GLenum, data: *mut GLint64) -> () {
 extern "system" fn get_integeri_v(target: GLenum, index: GLuint, data: *mut GLint) -> () {
     with_context(|cx| {
         let value = cx.webgl.get_indexed_parameter(target, index);
-        unpack_parameter(target, data, value);
+        unpack_parameter(cx, target, data, value);
     })
 }
 
@@ -1899,7 +1925,7 @@ extern "system" fn get_integeri_v(target: GLenum, index: GLuint, data: *mut GLin
 extern "system" fn get_integerv(pname: GLenum, data: *mut GLint) -> () {
     with_context(|cx| {
         let value = cx.webgl.get_parameter(pname);
-        unpack_parameter(pname, data, value);
+        unpack_parameter(cx, pname, data, value);
     })
 }
 
@@ -1915,7 +1941,7 @@ extern "system" fn get_internalformativ(
         let value = cx
             .webgl
             .get_internalformat_parameter(target, internalformat, pname);
-        unpack_parameter_bounded(pname, buf_size, ptr::null_mut(), params, value);
+        unpack_parameter_bounded(cx, pname, buf_size, ptr::null_mut(), params, value);
     })
 }
 
@@ -1951,7 +1977,7 @@ extern "system" fn get_programiv(program: GLuint, pname: GLenum, params: *mut GL
     try_with_context((), |cx| {
         let program = cx.shaders.get(program)?.as_program()?;
         let value = cx.webgl.get_program_parameter(program, pname);
-        unpack_parameter(pname, params, value);
+        unpack_parameter(cx, pname, params, value);
         Ok(())
     })
 }
@@ -1961,7 +1987,7 @@ extern "system" fn get_query_objectuiv(id: GLuint, pname: GLenum, params: *mut G
     try_with_context((), |cx| {
         let query = cx.queries.get(id)?;
         let value = cx.webgl.get_query_parameter(query, pname);
-        unpack_parameter(pname, params, value);
+        unpack_parameter(cx, pname, params, value);
         Ok(())
     })
 }
@@ -1988,7 +2014,7 @@ extern "system" fn get_renderbuffer_parameteriv(
 ) -> () {
     with_context(|cx| {
         let value = cx.webgl.get_renderbuffer_parameter(target, pname);
-        unpack_parameter(pname, params, value);
+        unpack_parameter(cx, pname, params, value);
     })
 }
 
@@ -2001,7 +2027,7 @@ extern "system" fn get_sampler_parameterfv(
     try_with_context((), |cx| {
         let sampler = cx.samplers.get(sampler)?;
         let value = cx.webgl.get_sampler_parameter(sampler, pname);
-        unpack_parameter(pname, params, value);
+        unpack_parameter(cx, pname, params, value);
         Ok(())
     })
 }
@@ -2015,7 +2041,7 @@ extern "system" fn get_sampler_parameteriv(
     try_with_context((), |cx| {
         let sampler = cx.samplers.get(sampler)?;
         let value = cx.webgl.get_sampler_parameter(sampler, pname);
-        unpack_parameter(pname, params, value);
+        unpack_parameter(cx, pname, params, value);
         Ok(())
     })
 }
@@ -2078,7 +2104,7 @@ extern "system" fn get_shaderiv(shader: GLuint, pname: GLenum, params: *mut GLin
     try_with_context((), |cx| {
         let shader = cx.shaders.get(shader)?.as_shader()?;
         let value = cx.webgl.get_shader_parameter(shader, pname);
-        unpack_parameter(pname, params, value);
+        unpack_parameter(cx, pname, params, value);
         Ok(())
     })
 }
@@ -2104,7 +2130,7 @@ extern "system" fn get_synciv(
     try_with_context((), |cx| {
         let sync = cx.syncs.get(sync as GLuint)?;
         let value = cx.webgl.get_sync_parameter(sync, pname);
-        unpack_parameter_bounded(pname, buf_size, length, values, value);
+        unpack_parameter_bounded(cx, pname, buf_size, length, values, value);
         Ok(())
     })
 }
@@ -2113,7 +2139,7 @@ extern "system" fn get_synciv(
 extern "system" fn get_tex_parameterfv(target: GLenum, pname: GLenum, params: *mut GLfloat) -> () {
     with_context(|cx| {
         let value = cx.webgl.get_tex_parameter(target, pname);
-        unpack_parameter(pname, params, value);
+        unpack_parameter(cx, pname, params, value);
     })
 }
 
@@ -2121,7 +2147,7 @@ extern "system" fn get_tex_parameterfv(target: GLenum, pname: GLenum, params: *m
 extern "system" fn get_tex_parameteriv(target: GLenum, pname: GLenum, params: *mut GLint) -> () {
     with_context(|cx| {
         let value = cx.webgl.get_tex_parameter(target, pname);
-        unpack_parameter(pname, params, value);
+        unpack_parameter(cx, pname, params, value);
     })
 }
 
@@ -2196,7 +2222,7 @@ extern "system" fn get_uniformfv(program: GLuint, location: GLint, params: *mut 
         let location = cx.uniforms.get_obj(program, location)?;
         let program = cx.shaders.get(program)?.as_program()?;
         let value = cx.webgl.get_uniform(program, location);
-        unpack_parameter(gl::NONE, params, value);
+        unpack_parameter(cx, gl::NONE, params, value);
         Ok(())
     })
 }
@@ -2207,7 +2233,7 @@ extern "system" fn get_uniformiv(program: GLuint, location: GLint, params: *mut 
         let location = cx.uniforms.get_obj(program, location)?;
         let program = cx.shaders.get(program)?.as_program()?;
         let value = cx.webgl.get_uniform(program, location);
-        unpack_parameter(gl::NONE, params, value);
+        unpack_parameter(cx, gl::NONE, params, value);
         Ok(())
     })
 }
@@ -2218,7 +2244,7 @@ extern "system" fn get_uniformuiv(program: GLuint, location: GLint, params: *mut
         let location = cx.uniforms.get_obj(program, location)?;
         let program = cx.shaders.get(program)?.as_program()?;
         let value = cx.webgl.get_uniform(program, location);
-        unpack_parameter(gl::NONE, params, value);
+        unpack_parameter(cx, gl::NONE, params, value);
         Ok(())
     })
 }
@@ -2227,7 +2253,7 @@ extern "system" fn get_uniformuiv(program: GLuint, location: GLint, params: *mut
 extern "system" fn get_vertex_attrib_iiv(index: GLuint, pname: GLenum, params: *mut GLint) -> () {
     with_context(|cx| {
         let value = cx.webgl.get_vertex_attrib(index, pname);
-        unpack_parameter(pname, params, value);
+        unpack_parameter(cx, pname, params, value);
     })
 }
 
@@ -2235,7 +2261,7 @@ extern "system" fn get_vertex_attrib_iiv(index: GLuint, pname: GLenum, params: *
 extern "system" fn get_vertex_attrib_iuiv(index: GLuint, pname: GLenum, params: *mut GLuint) -> () {
     with_context(|cx| {
         let value = cx.webgl.get_vertex_attrib(index, pname);
-        unpack_parameter(pname, params, value);
+        unpack_parameter(cx, pname, params, value);
     })
 }
 
@@ -2252,7 +2278,7 @@ extern "system" fn get_vertex_attrib_pointerv(
 extern "system" fn get_vertex_attribfv(index: GLuint, pname: GLenum, params: *mut GLfloat) -> () {
     with_context(|cx| {
         let value = cx.webgl.get_vertex_attrib(index, pname);
-        unpack_parameter(pname, params, value);
+        unpack_parameter(cx, pname, params, value);
     })
 }
 
@@ -2260,7 +2286,7 @@ extern "system" fn get_vertex_attribfv(index: GLuint, pname: GLenum, params: *mu
 extern "system" fn get_vertex_attribiv(index: GLuint, pname: GLenum, params: *mut GLint) -> () {
     with_context(|cx| {
         let value = cx.webgl.get_vertex_attrib(index, pname);
-        unpack_parameter(pname, params, value);
+        unpack_parameter(cx, pname, params, value);
     })
 }
 
