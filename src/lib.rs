@@ -6,6 +6,7 @@ use std::rc::Rc;
 use std::{fmt, mem, ptr, slice, str};
 
 use gl::types::*;
+use stdweb::unstable::TryInto;
 use stdweb::{Reference, Value};
 use unwind_aborts::unwind_aborts;
 use webgl_stdweb as webgl;
@@ -3326,9 +3327,14 @@ extern "system" fn use_program(program: GLuint) -> () {
         };
         cx.webgl.use_program(program);
 
-        let mut current_program = 0;
-        get_integerv(gl::CURRENT_PROGRAM, &mut current_program);
-        cx.uniforms.using_program(current_program as GLuint);
+        let current_program = match cx.webgl.get_parameter(gl::CURRENT_PROGRAM) {
+            Value::Reference(reference) => cx
+                .shaders
+                .find(ProgramOrShader::Program(reference.try_into().unwrap())),
+            Value::Null => 0,
+            _ => unreachable!(),
+        };
+        cx.uniforms.using_program(current_program);
 
         Ok(())
     })
