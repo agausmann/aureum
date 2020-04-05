@@ -5,10 +5,10 @@ use aureum::Context;
 use gl::types::*;
 use std::ffi::{CStr, CString};
 use std::{mem, ptr};
+use stdweb::js;
 use stdweb::unstable::TryInto;
 use stdweb::web::html_element::CanvasElement;
 use stdweb::web::{document, INode, IParentNode};
-use stdweb::{js, Reference};
 use webgl_stdweb::WebGLRenderingContext;
 
 struct UserData {
@@ -183,7 +183,7 @@ fn main() {
         .append_child(&canvas);
 
     let webgl: WebGLRenderingContext = canvas.get_context().unwrap();
-    let context = Context::new(Reference::from(webgl).try_into().unwrap());
+    let context = Context::new(webgl);
     aureum::make_current(Some(context.clone()));
 
     let user_data = init().unwrap();

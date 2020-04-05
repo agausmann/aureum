@@ -11,10 +11,26 @@ use stdweb::{Reference, Value};
 use unwind_aborts::unwind_aborts;
 use webgl_stdweb as webgl;
 use webgl_stdweb::{
-    GLContext, WebGLActiveInfo, WebGLBuffer, WebGLFramebuffer, WebGLProgram, WebGLQuery,
-    WebGLRenderbuffer, WebGLSampler, WebGLShader, WebGLSync, WebGLTexture, WebGLTransformFeedback,
-    WebGLUniformLocation, WebGLVertexArrayObject,
+    GLContext, WebGL2RenderingContext, WebGLActiveInfo, WebGLBuffer, WebGLFramebuffer,
+    WebGLProgram, WebGLQuery, WebGLRenderbuffer, WebGLRenderingContext, WebGLSampler, WebGLShader,
+    WebGLSync, WebGLTexture, WebGLTransformFeedback, WebGLUniformLocation, WebGLVertexArrayObject,
 };
+
+pub trait WebglContext {
+    fn to_gl_context(self) -> GLContext;
+}
+
+impl WebglContext for WebGLRenderingContext {
+    fn to_gl_context(self) -> GLContext {
+        Reference::from(self).try_into().unwrap()
+    }
+}
+
+impl WebglContext for WebGL2RenderingContext {
+    fn to_gl_context(self) -> GLContext {
+        Reference::from(self).try_into().unwrap()
+    }
+}
 
 #[derive(Clone)]
 pub struct Context {
@@ -22,10 +38,13 @@ pub struct Context {
 }
 
 impl Context {
-    pub fn new(webgl: GLContext) -> Self {
+    pub fn new<Cx>(webgl: Cx) -> Self
+    where
+        Cx: WebglContext,
+    {
         Self {
             inner: Rc::new(RefCell::new(ContextInner {
-                webgl,
+                webgl: webgl.to_gl_context(),
                 error_code: gl::NO_ERROR,
                 shaders: ObjectMap::new(),
                 buffers: ObjectMap::new(),
