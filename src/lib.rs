@@ -1,3 +1,37 @@
+//! A graphics library for WebAssembly that is mostly compatible with OpenGL ES 3.
+//!
+//! # Usage
+//!
+//! Currently, `aureum` must be used with an OpenGL loading library, such as the [`gl` crate][gl].
+//! Static bindings and support for other languages such as C may come in the future, however.
+//!
+//! In your Rust project, add the latest versions of `aureum` and `gl` to your `[dependencies]`,
+//! and then load the pointers for `aureum` before calling into GL. For example, your `main.rs` may
+//! look like this:
+//!
+//! ```no_run
+//! fn main() {
+//!     // non-GL code may go here ...
+//!
+//!     gl::load_with(aureum::get_proc_address);
+//!     let context = ContextBuilder::new()
+//!         .api(Api::Gles, (2, 0))
+//!         .canvas_id("app")
+//!         .build()
+//!         .expect("failed to build context");
+//!     context.make_current();
+//!
+//!     // ... GL code must go here, after the pointers are loaded
+//! }
+//! ```
+//!
+//! Context management and function pointer loading may be deferred as long as you need, you may
+//! even abstract them using a high-level API like Piston, as long as they both occur before any GL
+//! commands are invoked.
+//!
+//! [gl]: https://crates.io/crates/gl
+
+use std::borrow::Cow;
 use std::cell::{Ref, RefCell};
 use std::collections::HashSet;
 use std::ffi::{CStr, CString};
@@ -7,6 +41,8 @@ use std::{fmt, mem, ptr, slice, str};
 
 use gl::types::*;
 use stdweb::unstable::TryInto;
+use stdweb::web::html_element::CanvasElement;
+use stdweb::web::{document, IParentNode};
 use stdweb::{Reference, Value};
 use unwind_aborts::unwind_aborts;
 use webgl_stdweb as webgl;
@@ -16,35 +52,195 @@ use webgl_stdweb::{
     WebGLSync, WebGLTexture, WebGLTransformFeedback, WebGLUniformLocation, WebGLVertexArrayObject,
 };
 
-pub trait WebglContext {
-    fn to_gl_context(self) -> GLContext;
+/// The OpenGL APIs supported by this library.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Api {
+    /// OpenGL ES
+    Gles,
 }
 
-impl WebglContext for WebGLRenderingContext {
-    fn to_gl_context(self) -> GLContext {
-        Reference::from(self).try_into().unwrap()
+/// Builder-style constructor for `Context`s.
+#[derive(Debug, Clone)]
+pub struct ContextBuilder {
+    api: Api,
+    version: (u8, u8),
+    canvas: Option<CanvasSelector>,
+}
+
+impl ContextBuilder {
+    /// Creates a `ContextBuilder` with the default values:
+    ///
+    /// - `gl_version` - OpenGL ES 2.0
+    pub fn new() -> Self {
+        Default::default()
+    }
+
+    /// Requests for a specific version of OpenGL, given the API and major/minor version numbers.
+    ///
+    /// Supported versions:
+    ///
+    /// - `Api::Gles, (2, 0)` (OpenGL ES 2.0)
+    /// - `Api::Gles, (3, 0)` (OpenGL ES 3.0)
+    ///
+    /// Default: OpenGL ES 2.0
+    pub fn gl_version(&mut self, api: Api, version: (u8, u8)) -> &mut Self {
+        self.api = api;
+        self.version = version;
+        self
+    }
+
+    /// Fetches the HTML canvas element with the given ID and sets it as the target canvas.
+    pub fn canvas_id(&mut self, id: &str) -> &mut Self {
+        self.canvas = Some(CanvasSelector::ById(id.to_owned()));
+        self
+    }
+
+    /// Sets the target canvas to the given `CanvasElement`.
+    pub fn canvas(&mut self, canvas: &CanvasElement) -> &mut Self {
+        self.canvas = Some(CanvasSelector::Explicit(canvas.clone()));
+        self
+    }
+
+    /// Attempts to build a `Context` from this configuration.
+    pub fn build(&self) -> Result<Context, Error> {
+        let canvas = self
+            .canvas
+            .as_ref()
+            .ok_or_else(|| Error::new("no canvas element was specified"))?
+            .get_canvas()?;
+        let webgl = match (self.api, self.version) {
+            (Api::Gles, (2, 0)) => canvas
+                .get_context::<WebGLRenderingContext>()
+                .map_err(|e| Error::with_source(e, "unable to create WebGL context"))?
+                .as_ref()
+                .try_into()
+                .unwrap(),
+            (Api::Gles, (3, 0)) => canvas
+                .get_context::<WebGL2RenderingContext>()
+                .map_err(|e| Error::with_source(e, "unable to create WebGL context"))?
+                .as_ref()
+                .try_into()
+                .unwrap(),
+            other => {
+                return Err(Error::new(format!(
+                    "unsupported OpenGL version: {:?}",
+                    other,
+                )))
+            }
+        };
+        Ok(Context::new(webgl))
     }
 }
 
-impl WebglContext for WebGL2RenderingContext {
-    fn to_gl_context(self) -> GLContext {
-        Reference::from(self).try_into().unwrap()
+impl Default for ContextBuilder {
+    fn default() -> Self {
+        Self {
+            api: Api::Gles,
+            version: (2, 0),
+            canvas: None,
+        }
     }
 }
 
+/// Represents the ways a canvas can be identified by the user.
+#[derive(Debug, Clone)]
+enum CanvasSelector {
+    /// The user provided the given string as the element ID.
+    ById(String),
+
+    /// The user provided a reference to the element directly.
+    Explicit(CanvasElement),
+}
+
+impl CanvasSelector {
+    /// Resolves the selector, producing a reference to the canvas element upon success.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if:
+    ///
+    /// - The given ID was not valid.
+    /// - There is no element with the given ID.
+    /// - The element pointed to by the given ID is not a canvas element.
+    fn get_canvas(&self) -> Result<Cow<CanvasElement>, Error> {
+        match self {
+            Self::ById(id) => {
+                let canvas: CanvasElement = document()
+                    .query_selector(id)
+                    .map_err(|e| Error::with_source(e, "invalid id"))?
+                    .ok_or_else(|| Error::new("no element with exists with the given id"))?
+                    .try_into()
+                    .map_err(|e| {
+                        Error::with_source(e, "the given element is not a canvas element")
+                    })?;
+                Ok(Cow::Owned(canvas))
+            }
+            Self::Explicit(canvas) => Ok(Cow::Borrowed(&canvas)),
+        }
+    }
+}
+
+/// The generic error type returned by this crate in the case of failure.
+pub struct Error {
+    message: String,
+    source: Option<Box<dyn std::error::Error + 'static>>,
+}
+
+impl Error {
+    pub(crate) fn new<S>(message: S) -> Self
+    where
+        S: Into<String>,
+    {
+        Self {
+            message: message.into(),
+            source: None,
+        }
+    }
+
+    pub(crate) fn with_source<E, S>(source: E, message: S) -> Self
+    where
+        E: std::error::Error + 'static,
+        S: Into<String>,
+    {
+        Self {
+            message: message.into(),
+            source: Some(Box::new(source)),
+        }
+    }
+}
+
+impl fmt::Display for Error {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(f, "{}", self.message)
+    }
+}
+
+impl fmt::Debug for Error {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(f, "{}", self)
+    }
+}
+
+impl std::error::Error for Error {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        self.source.as_ref().map(AsRef::as_ref)
+    }
+}
+
+/// A shared handle to an OpenGL context.
+///
+/// To construct `Context` instances, see `ContextBuilder`.
 #[derive(Clone)]
 pub struct Context {
     inner: Rc<RefCell<ContextInner>>,
 }
 
 impl Context {
-    pub fn new<Cx>(webgl: Cx) -> Self
-    where
-        Cx: WebglContext,
-    {
+    /// Creates a new context from a given WebGL context.
+    pub(crate) fn new(webgl: GLContext) -> Self {
         Self {
             inner: Rc::new(RefCell::new(ContextInner {
-                webgl: webgl.to_gl_context(),
+                webgl,
                 error_code: gl::NO_ERROR,
                 shaders: ObjectMap::new(),
                 buffers: ObjectMap::new(),
@@ -59,6 +255,16 @@ impl Context {
                 uniforms: UniformMap::new(),
             })),
         }
+    }
+
+    /// Returns `true` if this context is currently active.
+    pub fn is_current(&self) -> bool {
+        is_current(Some(&self))
+    }
+
+    /// Makes this the currently active context.
+    pub fn make_current(&self) {
+        make_current(Some(self.clone()));
     }
 }
 
@@ -78,33 +284,69 @@ impl PartialEq for Context {
 
 impl Eq for Context {}
 
+/// The inner structure that contains context state.
 struct ContextInner {
+    /// The wrapped WebGL context.
     webgl: GLContext,
+
+    /// Local error code storage, for errors generated by this layer. If there is no error,
+    /// this will be equal to `NO_ERROR`.
     error_code: GLenum,
+
+    /// Maps integer keys to JS program and shader objects.
     shaders: ObjectMap<ProgramOrShader>,
+
+    /// Maps integer keys to JS buffer objects.
     buffers: ObjectMap<WebGLBuffer>,
+
+    /// Maps integer keys to JS framebuffer objects.
     framebuffers: ObjectMap<WebGLFramebuffer>,
+
+    /// Maps integer keys to JS query objects.
     queries: ObjectMap<WebGLQuery>,
+
+    /// Maps integer keys to JS renderbuffer objects.
     renderbuffers: ObjectMap<WebGLRenderbuffer>,
+
+    /// Maps integer keys to JS sampler objects.
     samplers: ObjectMap<WebGLSampler>,
+
+    /// Maps integer keys to JS sync objects.
+    /// (Keys are currently manually converted between integers and GLsyncs)
     syncs: ObjectMap<WebGLSync>,
+
+    /// Maps integer keys to JS texture objects.
     textures: ObjectMap<WebGLTexture>,
+
+    /// Maps integer keys to JS transform feedback objects.
     transform_feedbacks: ObjectMap<WebGLTransformFeedback>,
+
+    /// Maps integer keys to JS vertex array objects.
     vertex_arrays: ObjectMap<WebGLVertexArrayObject>,
+
+    /// Maps integer keys to per-program JS uniform locations.
     uniforms: UniformMap,
 }
 
+/// A mapping from integer keys to arbitrary object types. Used to maintain and query a mapping
+/// between the integer object names used by OpenGL and the JS objects used by WebGL.
 struct ObjectMap<T> {
     objects: Vec<Option<T>>,
 }
 
 impl<T> ObjectMap<T> {
+    /// Constructs a new map with no registered objects.
     fn new() -> Self {
         Self {
             objects: vec![None],
         }
     }
 
+    /// Gets the object corresponding to the given ID if one exists.
+    ///
+    /// # Errors
+    ///
+    /// Returns `INVALID_VALUE` if `id` is zero or does not have a corresponding object.
     fn get(&self, id: GLuint) -> Result<&T, GLenum> {
         self.objects
             .get(id as usize)
@@ -113,6 +355,11 @@ impl<T> ObjectMap<T> {
             .ok_or(gl::INVALID_VALUE)
     }
 
+    /// Gets the object corresponding to the given ID if one exists, or `None` if the ID is zero.
+    ///
+    /// # Errors
+    ///
+    /// Returns `INVALID_VALUE` if `id` is not zero and does not have a corresponding object.
     fn get_nullable(&self, id: GLuint) -> Result<Option<&T>, GLenum> {
         if id == 0 {
             Ok(None)
@@ -121,6 +368,8 @@ impl<T> ObjectMap<T> {
         }
     }
 
+    /// Gets the ID corresponding to the given object. If the object does not yet exist in the map,
+    /// it will be assigned an ID.
     fn find(&mut self, obj: T) -> GLuint
     where
         T: AsRef<Reference>,
@@ -133,6 +382,8 @@ impl<T> ObjectMap<T> {
         self.add(Some(obj))
     }
 
+    /// Adds the given object to the map, assigning it an ID, or returns zero if the input is
+    /// `None`.
     fn add(&mut self, obj: Option<T>) -> GLuint {
         if obj.is_some() {
             for (id, slot) in self.objects.iter_mut().enumerate().skip(1) {
@@ -149,6 +400,13 @@ impl<T> ObjectMap<T> {
         }
     }
 
+    /// Removes the entry corresponding to the given ID from the map, returning the corresponding
+    /// object. If the ID is zero, `None` will be returned instead.
+    ///
+    /// # Errors
+    ///
+    /// Returns `INVALID_VALUE` if the ID is not zero and there is no entry corresponding to the
+    /// given ID.
     fn remove(&mut self, id: GLuint) -> Result<Option<T>, GLenum> {
         if id == 0 {
             Ok(None)
@@ -163,12 +421,20 @@ impl<T> ObjectMap<T> {
     }
 }
 
+/// Maintains a mapping from OpenGL's integer uniform locations to WebGL's JS objects.
+/// The namespace of the integer IDs is per-program, so this map also accounts for which program is
+/// currently used and being queried.
 struct UniformMap {
+    /// The most recent program to be passed to `UseProgram`, which is used as the implicit program
+    /// ID in some queries.
     active_program: GLuint,
+
+    /// The mapping from program IDs to uniform IDs to uniform objects.
     map: Vec<Vec<WebGLUniformLocation>>,
 }
 
 impl UniformMap {
+    /// Constructs a new map with no entries.
     fn new() -> Self {
         Self {
             active_program: 0,
@@ -176,19 +442,34 @@ impl UniformMap {
         }
     }
 
+    /// References the sub-map of uniform locations for the given program ID.
     fn uniforms(&self, program: GLuint) -> &Vec<WebGLUniformLocation> {
         &self.map[program as usize]
     }
 
+    /// Mutably references the sub-map of uniform locations for the given program ID.
     fn uniforms_mut(&mut self, program: GLuint) -> &mut Vec<WebGLUniformLocation> {
         &mut self.map[program as usize]
     }
 
+    /// Gets the object corresponding to the given program and uniform location.
+    ///
+    /// # Errors
+    ///
+    /// Returns `INVALID_OPERATION` if the uniform location is -1 or the given program and uniform
+    /// location does not have a corresponding object.
     fn get_obj(&self, program: GLuint, id: GLint) -> Result<&WebGLUniformLocation, GLenum> {
         self.get_obj_nullable(program, id)
             .and_then(|opt| opt.ok_or(gl::INVALID_OPERATION))
     }
 
+    /// Gets the object corresponding to the given program and uniform location, or `None` if the
+    /// location is `-1`.
+    ///
+    /// # Errors
+    ///
+    /// Returns `INVALID_OPERATION` if the uniform location is not -1 and the given program and
+    /// uniform location does not have a corresponding object.
     fn get_obj_nullable(
         &self,
         program: GLuint,
@@ -204,10 +485,14 @@ impl UniformMap {
         }
     }
 
+    /// Equivalent to `get_obj_nullable`, with `program` being `self.active_program`.
     fn get_active_obj_nullable(&self, id: GLint) -> Result<Option<&WebGLUniformLocation>, GLenum> {
         self.get_obj_nullable(self.active_program, id)
     }
 
+    /// Gets the uniform location ID corresponding to the given object for the active program, or
+    /// `-1` if the input is `None`. If the object does not exist in the map, it will be assigned
+    /// an ID.
     fn get_id(&mut self, obj: Option<WebGLUniformLocation>) -> GLint {
         let uniforms = self.uniforms_mut(self.active_program);
         if let Some(obj) = obj {
@@ -224,19 +509,28 @@ impl UniformMap {
         }
     }
 
+    /// Sets the active program to the given program ID.
     fn using_program(&mut self, program_id: GLuint) {
         self.active_program = program_id;
     }
 
+    /// (Re-)initializes the map for the given program ID.
     fn program_created(&mut self, program_id: GLuint) {
         if let Some(uniforms) = self.map.get_mut(program_id as usize) {
+            // If this ID is reused, we don't want to keep the locations from the previous program.
             uniforms.clear();
         } else {
+            // Otherwise, add the program to the map.
             self.map.resize(program_id as usize - 1, Vec::new())
         }
     }
 }
 
+/// Represents either a program or a shader object.
+///
+/// This is used to unify the integer namespace of program and shader objects, per the
+/// specification [ref], by storing this object in a single map instead of having two separate
+/// maps.
 enum ProgramOrShader {
     Program(WebGLProgram),
     Shader(WebGLShader),
@@ -285,10 +579,16 @@ thread_local! {
     static CURRENT_CONTEXT: RefCell<Option<Context>> = RefCell::new(None);
 }
 
+/// Returns whether the given context handle points to the current context.
+///
+/// If `context` is `None`, returns `true` if no context is active.
 pub fn is_current(context: Option<&Context>) -> bool {
     CURRENT_CONTEXT.with(|cell| cell.borrow().as_ref() == context)
 }
 
+/// Makes the given context current, returning the previously current context if any.
+///
+/// If `context` is `None`, the current context is unset.
 pub fn make_current(context: Option<Context>) -> Option<Context> {
     CURRENT_CONTEXT.with(|cell| mem::replace(&mut *cell.borrow_mut(), context))
 }

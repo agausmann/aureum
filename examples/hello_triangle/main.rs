@@ -1,7 +1,7 @@
 // Example adapted from "Hello Triangle", available at the following URL:
 // https://www.khronos.org/assets/uploads/books/openglr_es_20_programming_guide_sample.pdf
 
-use aureum::Context;
+use aureum::{Api, ContextBuilder};
 use gl::types::*;
 use std::ffi::{CStr, CString};
 use std::{mem, ptr};
@@ -9,7 +9,6 @@ use stdweb::js;
 use stdweb::unstable::TryInto;
 use stdweb::web::html_element::CanvasElement;
 use stdweb::web::{document, INode, IParentNode};
-use webgl_stdweb::WebGLRenderingContext;
 
 struct UserData {
     program_object: GLuint,
@@ -182,9 +181,12 @@ fn main() {
         .unwrap()
         .append_child(&canvas);
 
-    let webgl: WebGLRenderingContext = canvas.get_context().unwrap();
-    let context = Context::new(webgl);
-    aureum::make_current(Some(context.clone()));
+    let context = ContextBuilder::new()
+        .gl_version(Api::Gles, (2, 0))
+        .canvas(&canvas)
+        .build()
+        .expect("unable to create context");
+    context.make_current();
 
     let user_data = init().unwrap();
 
