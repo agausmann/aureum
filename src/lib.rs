@@ -31,6 +31,10 @@
 //!
 //! [gl]: https://crates.io/crates/gl
 
+// Section references in the implementation details come from the OpenGL ES 3.0 specification. The
+// latest one at the time of writing is available here:
+// https://www.khronos.org/registry/OpenGL/specs/es/3.0/es_spec_3.0.pdf
+
 use std::borrow::Cow;
 use std::cell::{Ref, RefCell};
 use std::collections::HashSet;
@@ -536,9 +540,13 @@ impl UniformMap {
 
 /// Represents either a program or a shader object.
 ///
-/// This is used to unify the integer namespace of program and shader objects, per the
-/// specification [ref], by storing this object in a single map instead of having two separate
-/// maps.
+/// This is used to unify the integer namespace of program and shader objects, by storing this
+/// object in a single map instead of having two separate maps.
+///
+/// This is to comply with section 2.12.1:
+///
+/// > The name space for shader objects is the unsigned integers, with zero reserved for the GL.
+/// > This name space is shared with program objects.
 enum ProgramOrShader {
     Program(WebGLProgram),
     Shader(WebGLShader),
@@ -601,6 +609,7 @@ pub fn make_current(context: Option<Context>) -> Option<Context> {
     CURRENT_CONTEXT.with(|cell| mem::replace(&mut *cell.borrow_mut(), context))
 }
 
+/// Borrows the current context, passing it to the given function.
 fn with_context<F, R>(func: F) -> R
 where
     F: FnOnce(&mut ContextInner) -> R,
@@ -614,6 +623,9 @@ where
     })
 }
 
+/// Borrows the current context and passes it to the given function. Upon success, the return value
+/// will be passed through; if the function fails, the error will be stored in the context's error
+/// code and `err_val` will be returned instead.
 fn try_with_context<F, R>(err_val: R, func: F) -> R
 where
     F: FnOnce(&mut ContextInner) -> Result<R, GLenum>,
@@ -627,10 +639,14 @@ where
     })
 }
 
+/// Interprets the given void pointer as a byte buffer with `size` bytes, returning a slice
+/// containing the data in the buffer.
 fn user_bytes<'a>(size: GLsizei, data: *const c_void) -> &'a [u8] {
     user_array(size, data as *const _)
 }
 
+/// Interprets the given pointer as a clear value for the given type, per the documentation of
+/// `ClearBuffer` in section 4.2.3. Returns a slice containing the pointed-to clear values.
 fn buffer_value<'a, T>(buffer: GLenum, values: *const T) -> &'a [T] {
     let size = match buffer {
         gl::COLOR => 4,
@@ -641,49 +657,99 @@ fn buffer_value<'a, T>(buffer: GLenum, values: *const T) -> &'a [T] {
     user_array(size, values)
 }
 
+/// Interprets the given pointer as an array of `size` values of `T`, returning a slice containing
+/// the values in this array.
 fn user_array<'a, T>(size: GLsizei, data: *const T) -> &'a [T] {
+    // SAFETY:
+    //
+    // - "`data` must be non-null and aligned." This is guaranteed by the contract the GL has with
+    // the user, that they provide non-null and valid pointers where necessary.
+    //
+    // - "The memory referenced by the returned slice must not be accessed/mutated for the duration
+    // of lifetime 'a." This is guaranteed also by the contract the user enters with GL, and by
+    // limiting the lifetime of the resulting slice.
+    //
+    // According to section 2.1, data binding occurs on call, meaning the pointed-to data should
+    // only be accessed while the command has not returned. We can guarantee this by checking that
+    // the lifetime of the borrow never outlives the command call. There are patterns (like
+    // `LocalKey::with`) that achieve this, but it's simply not practical to write code with
+    // multiple things being borrowed.
     unsafe { slice::from_raw_parts(data, size as usize) }
 }
 
+/// Interprets the given pointer as a nullable array of `size` values of `T`, returning a slice
+/// containing the values in this array, or `None` if the pointer is null.
 fn user_array_nullable<'a, T>(size: GLsizei, data: *const T) -> Option<&'a [T]> {
     if data.is_null() {
         None
     } else {
+        // SAFETY: See `user_array`.
         unsafe { Some(slice::from_raw_parts(data, size as usize)) }
     }
 }
 
+/// Interprets the given pointer as a mutable array of `size` values of `T`, returning a slice
+/// containing the values in this array.
 fn user_array_mut<'a, T>(size: GLsizei, data: *mut T) -> &'a mut [T] {
+    // SAFETY: See `user_array`.
     unsafe { slice::from_raw_parts_mut(data, size as usize) }
 }
 
+/// Converts a GL boolean into the equivalent WebGL boolean.
 fn webgl_boolean(v: GLboolean) -> webgl::GLboolean {
-    v != 0
+    match v {
+        gl::FALSE => false,
+        _ => true,
+    }
 }
 
+/// Converts a WebGL boolean into the equivalent GL boolean.
 fn gl_boolean(v: webgl::GLboolean) -> GLboolean {
-    v.into()
+    match v {
+        false => gl::FALSE,
+        true => gl::TRUE,
+    }
 }
 
+/// Interprets the given nul-terminated character array as a UTF-8 encoded string, returning a
+/// string slice or `INVALID_VALUE` if the string is not valid UTF-8.
 fn user_str<'a>(data: *const GLchar) -> Result<&'a str, GLenum> {
+    // SAFETY: See `user_array`.
     unsafe { CStr::from_ptr(data).to_str().map_err(|_| gl::INVALID_VALUE) }
 }
 
+/// Interprets the given character array as a UTF-8 encoded string, returning a string slice or
+/// `INVALID_VALUE` if the string is not valid UTF-8.
 fn user_str_bounded<'a>(len: GLsizei, data: *const GLchar) -> Result<&'a str, GLenum> {
+    // SAFETY: See `user_array`.
     unsafe {
         str::from_utf8(slice::from_raw_parts(data as *const u8, len as usize))
             .map_err(|_| gl::INVALID_VALUE)
     }
 }
 
+/// Interprets the given pointer as a single mutable location, returning a reference to that
+/// location.
 fn user_mut<'a, T>(data: *mut T) -> &'a mut T {
+    // SAFETY: See `user_array`.
     unsafe { &mut *data }
 }
 
+/// Interprets the given nullable pointer as a single mutable location, returning a reference to
+/// that location, or `None` if the pointer is null.
 fn user_nullable_mut<'a, T>(data: *mut T) -> Option<&'a mut T> {
+    // SAFETY: See `user_array`.
     unsafe { data.as_mut() }
 }
 
+/// Fills `dst` with the contents of `src`, following these rules:
+///
+/// - `dst` must be nul-terminated.
+///
+/// - No more than `dst_len` bytes, including nul, may be written to `dst`. If `src` is longer than
+/// `dst_len - 1` bytes, it will be truncated.
+///
+/// - If `len_out` is not null, the number of non-nul bytes copied will be written to `len_out`.
 fn unpack_str(dst_len: GLsizei, len_out: *mut GLsizei, dst: *mut GLchar, src: &str) {
     let len_out = user_nullable_mut(len_out);
     let dst = user_array_mut(dst_len, dst as *mut u8);
@@ -698,6 +764,12 @@ fn unpack_str(dst_len: GLsizei, len_out: *mut GLsizei, dst: *mut GLchar, src: &s
     }
 }
 
+/// Fills `dst` with the contents of `src`, following these rules:
+///
+/// - No more than `dst_len` elements may be written to `dst`. If `src` is longer than `dst_len`,
+/// it will be truncated.
+///
+/// - If `len_out` is not null, the number of elements copied will be written to `len_out`
 fn unpack_array<T: Copy>(dst_len: GLsizei, len_out: *mut GLsizei, dst: *mut T, src: &[T]) {
     let len_out = user_nullable_mut(len_out);
     let dst = user_array_mut(dst_len, dst);
@@ -709,6 +781,9 @@ fn unpack_array<T: Copy>(dst_len: GLsizei, len_out: *mut GLsizei, dst: *mut T, s
         *len_out = copy_len as GLsizei;
     }
 }
+
+/// Unpacks the given active info according to sections 2.12.{5,6,8}, `GetActiveAttrib`,
+/// `GetActiveUniform`, and `GetTransformFeedbackVarying`.
 fn unpack_active_info(
     buf_size: GLsizei,
     length: *mut GLsizei,
@@ -725,9 +800,15 @@ fn unpack_active_info(
     *type_ = info_src.type_();
 }
 
+/// Implements the conversion logic between WebGL parameter values and GL parameter types,
+/// according to section 6.1.2.
 trait Parameter: Sized {
+    /// Converts the given WebGL parameter value into a value of `Self`.
     fn from_webgl(cx: &mut ContextInner, value: Value) -> Self;
 
+    /// Converts the given WebGL parameter value into a value of `Self`, given that the parameter
+    /// is a normalized float type like color components, DepthRange values, or depth buffer clear
+    /// values. Defaults to `from_webgl`.
     fn from_webgl_normalized(cx: &mut ContextInner, value: Value) -> Self {
         Self::from_webgl(cx, value)
     }
@@ -739,7 +820,11 @@ macro_rules! impl_parameter_for_int {
         impl Parameter for $ty {
             fn from_webgl(cx: &mut ContextInner, value: Value) -> Self {
                 match value {
+                    // > a boolean value of TRUE or FALSE is interpreted as 1 or 0, respectively.
                     Value::Bool(true) => 1,
+                    Value::Bool(false) => 0,
+
+                    // > a floating-point value is rounded to the nearest integer
                     Value::Number(number) => {
                         let number = f64::from(number);
                         if number > Self::max_value() as f64 {
@@ -750,6 +835,8 @@ macro_rules! impl_parameter_for_int {
                             number.round() as Self
                         }
                     }
+
+                    // Convert object references into their integer IDs.
                     Value::Reference(ref reference) => {
                         use stdweb::unstable::TryInto;
 
@@ -775,12 +862,18 @@ macro_rules! impl_parameter_for_int {
                             panic!("unknown reference type")
                         }
                     }
+
                     _ => 0,
                 }
             }
 
             fn from_webgl_normalized(cx: &mut ContextInner, value: Value) -> Self {
                 match value {
+                    // > a floating-point value is rounded to the nearest integer, unless the value
+                    // is an RGBA color component, a `DepthRangef` value, or a depth buffer clear
+                    // value.  In these cases, the `Get` command converts the floating-point value
+                    // to an integer according to the `INT` entry of table 4.5; a value not in
+                    // [−1,1] converts to an undefined value.
                     Value::Number(number) => {
                         // Equations 2.3 and 2.4 from the GLES 3.0 spec:
                         (f64::from(number) * Self::max_value() as f64).round() as Self
@@ -797,7 +890,10 @@ impl_parameter_for_int!(GLint, GLuint, GLint64);
 impl Parameter for GLboolean {
     fn from_webgl(_cx: &mut ContextInner, value: Value) -> Self {
         match value {
-            Value::Bool(true) => gl::TRUE,
+            Value::Bool(b) => gl_boolean(b),
+
+            // > A floating-point or integer value converts to `FALSE` if and only if it is zero
+            // (otherwise it converts to `TRUE`).
             Value::Number(number) if number != 0 => gl::TRUE,
             _ => gl::FALSE,
         }
@@ -807,17 +903,24 @@ impl Parameter for GLboolean {
 impl Parameter for GLfloat {
     fn from_webgl(_cx: &mut ContextInner, value: Value) -> Self {
         match value {
+            // > a boolean value of `TRUE` or `FALSE` is interpreted as 1.0 or 0.0, respectively.
             Value::Bool(true) => 1.0,
+            Value::Bool(false) => 0.0,
+
+            // > an integer is coerced to floating-point.
             Value::Number(number) => f64::from(number) as GLfloat,
             _ => 0.0,
         }
     }
 }
 
+/// Unpacks the given parameter value into `dst`, based on the logic in section 6.1.2.
 fn unpack_parameter<T: Parameter>(cx: &mut ContextInner, pname: GLenum, dst: *mut T, src: Value) {
     unpack_parameter_bounded(cx, pname, GLsizei::max_value(), ptr::null_mut(), dst, src)
 }
 
+/// Unpacks the given parameter value into `dst`, with a given upper bound for the number of values
+/// allowed for an array parameter.
 fn unpack_parameter_bounded<T: Parameter>(
     cx: &mut ContextInner,
     pname: GLenum,
@@ -860,6 +963,8 @@ thread_local! {
     static STRING_CACHE: RefCell<HashSet<CString>> = RefCell::new(HashSet::new());
 }
 
+/// Caches the given string parameter, producing a stable pointer to a static nul-terminated
+/// string, according to section 6.1.6.
 fn cache_string(value: Value) -> *const GLubyte {
     if let Some(s) = value.as_str() {
         STRING_CACHE.with(|cell| {
