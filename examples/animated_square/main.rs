@@ -119,7 +119,7 @@ fn main() {
         current_scale,
         previous_time,
     });
-    animate_scene(Box::leak(user_data));
+    animate_scene(0.0, Box::leak(user_data));
 }
 
 fn build_shader_program(shader_set: &[(GLenum, &[u8])]) -> GLuint {
@@ -208,9 +208,14 @@ struct UserData {
     previous_time: f64,
 }
 
-fn animate_scene(data_ptr: *mut UserData) {
+fn animate_scene(current_time: f64, data_ptr: *mut UserData) {
     unsafe {
         let data = &mut *data_ptr;
+        let delta_angle =
+            ((current_time - data.previous_time) as GLfloat / 1000.0) * data.degrees_per_second;
+        data.current_angle = (data.current_angle + delta_angle) % 360.0;
+        data.previous_time = current_time;
+
         gl::Viewport(0, 0, WIDTH, HEIGHT);
         gl::ClearColor(0.8, 0.9, 1.0, 1.0);
         gl::Clear(gl::COLOR_BUFFER_BIT);
@@ -236,12 +241,6 @@ fn animate_scene(data_ptr: *mut UserData) {
         );
 
         gl::DrawArrays(gl::TRIANGLES, 0, data.vertex_count);
-        window().request_animation_frame(move |current_time| {
-            let delta_angle =
-                ((current_time - data.previous_time) as GLfloat / 1000.0) * data.degrees_per_second;
-            data.current_angle = (data.current_angle + delta_angle) % 360.0;
-            data.previous_time = current_time;
-            animate_scene(data_ptr)
-        });
     }
+    window().request_animation_frame(move |current_time| animate_scene(current_time, data_ptr));
 }
