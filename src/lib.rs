@@ -15,7 +15,7 @@
 //!
 //!     gl::load_with(aureum::get_proc_address);
 //!     let context = ContextBuilder::new()
-//!         .api(Api::Gles, (2, 0)) // specify the required API version
+//!         .gl_version(Api::Gles, (2, 0)) // specify the required API version
 //!         .canvas_id("app") // tell aureum to use the canvas with `id="app"`
 //!         .build()
 //!         .expect("failed to build context");
