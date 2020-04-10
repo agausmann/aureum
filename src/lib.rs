@@ -59,7 +59,7 @@ pub enum Api {
     Gles,
 }
 
-/// Builder-style constructor for `Context`s.
+/// Builder-style constructor for [`Context`]s.
 #[derive(Debug, Clone)]
 pub struct ContextBuilder {
     api: Api,
@@ -68,7 +68,7 @@ pub struct ContextBuilder {
 }
 
 impl ContextBuilder {
-    /// Creates a `ContextBuilder` with the default values:
+    /// Creates a [`ContextBuilder`] with the default values:
     ///
     /// - `gl_version` - OpenGL ES 2.0
     pub fn new() -> Self {
@@ -95,13 +95,13 @@ impl ContextBuilder {
         self
     }
 
-    /// Sets the target canvas to the given `CanvasElement`.
+    /// Sets the target canvas to the given [`CanvasElement`].
     pub fn canvas(&mut self, canvas: &CanvasElement) -> &mut Self {
         self.canvas = Some(CanvasSelector::Explicit(canvas.clone()));
         self
     }
 
-    /// Attempts to build a `Context` from this configuration.
+    /// Attempts to build a [`Context`] from this configuration.
     ///
     /// # Errors
     ///
@@ -237,7 +237,7 @@ impl std::error::Error for Error {
 
 /// A shared handle to an OpenGL context.
 ///
-/// To construct `Context` instances, see `ContextBuilder`.
+/// To construct [`Context`] instances, see [`ContextBuilder`].
 #[derive(Clone)]
 pub struct Context {
     inner: Rc<RefCell<ContextInner>>,
