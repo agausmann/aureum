@@ -533,7 +533,7 @@ impl UniformMap {
             uniforms.clear();
         } else {
             // Otherwise, add the program to the map.
-            self.map.resize(program_id as usize - 1, Vec::new())
+            self.map.resize(program_id as usize + 1, Vec::new())
         }
     }
 }
