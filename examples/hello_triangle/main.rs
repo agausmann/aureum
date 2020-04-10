@@ -148,6 +148,8 @@ fn draw(user_data: &UserData) {
         gl::UseProgram(user_data.program_object);
 
         // Load the vertex data
+        // TODO: Use client-side buffers here instead, like the original example, once they are
+        // implemented.
         gl::BindBuffer(gl::ARRAY_BUFFER, user_data.vertex_buffer);
         gl::BufferData(
             gl::ARRAY_BUFFER,
