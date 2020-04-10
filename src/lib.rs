@@ -1,13 +1,13 @@
-//! A graphics library for WebAssembly that is mostly compatible with OpenGL ES 3.
+//! A graphics library for WebAssembly that is mostly compatible with OpenGL ES 2.0/3.0.
 //!
 //! # Usage
 //!
-//! Currently, `aureum` must be used with an OpenGL loading library, such as the [`gl` crate][gl].
-//! Static bindings and support for other languages such as C may come in the future, however.
+//! Currently, `aureum` can only be used in Rust, and must be used with an OpenGL loading library,
+//! such as the [`gl` crate][gl]. Static bindings and a C library are planned for future releases.
 //!
 //! In your Rust project, add the latest versions of `aureum` and `gl` to your `[dependencies]`,
-//! and then load the pointers for `aureum` before calling into GL. For example, your `main.rs` may
-//! look like this:
+//! and then create a context and load the pointers for `aureum` before calling into GL. For
+//! example, your `main.rs` may look like this:
 //!
 //! ```no_run
 //! fn main() {
@@ -15,8 +15,8 @@
 //!
 //!     gl::load_with(aureum::get_proc_address);
 //!     let context = ContextBuilder::new()
-//!         .api(Api::Gles, (2, 0))
-//!         .canvas_id("app")
+//!         .api(Api::Gles, (2, 0)) // specify the required API version
+//!         .canvas_id("app") // tell aureum to use the canvas with `id="app"`
 //!         .build()
 //!         .expect("failed to build context");
 //!     context.make_current();
@@ -25,9 +25,9 @@
 //! }
 //! ```
 //!
-//! Context management and function pointer loading may be deferred as long as you need, you may
-//! even abstract them using a high-level API like Piston, as long as they both occur before any GL
-//! commands are invoked.
+//! Context creation and function pointer loading may be deferred as long as you like, as long as
+//! they both occur before any GL commands are invoked. You may even abstract them using a
+//! higher-level API like Piston if you wish.
 //!
 //! [gl]: https://crates.io/crates/gl
 
@@ -102,6 +102,14 @@ impl ContextBuilder {
     }
 
     /// Attempts to build a `Context` from this configuration.
+    ///
+    /// # Errors
+    ///
+    /// Context creation can fail if:
+    ///
+    /// - No canvas was specified or resolution of the canvas ID failed.
+    /// - The required OpenGL version is not supported by this library.
+    /// - The canvas failed to provide the required WebGL context.
     pub fn build(&self) -> Result<Context, Error> {
         let canvas = self
             .canvas
@@ -867,6 +875,9 @@ fn cache_string(value: Value) -> *const GLubyte {
     }
 }
 
+/// Returns a pointer to a function given its name, or a null pointer if the named function is not
+/// available. Designed to be passed to the `gl` crate like
+/// `gl::load_with(aureum::get_proc_address)`.
 pub fn get_proc_address(name: &str) -> *const c_void {
     match name {
         "glActiveTexture" => active_texture as *const _,
