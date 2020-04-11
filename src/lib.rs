@@ -1565,8 +1565,15 @@ extern "system" fn buffer_data(
     data: *const c_void,
     usage: GLenum,
 ) -> () {
-    let data = user_bytes(size as GLsizei, data);
-    with_context(|cx| cx.webgl.buffer_data_2(target, data, usage, 0, 0))
+    with_context(|cx| {
+        if data.is_null() {
+            cx.webgl
+                .buffer_data(target, size as webgl::GLsizeiptr, usage)
+        } else {
+            let data = user_bytes(size as GLsizei, data);
+            cx.webgl.buffer_data_2(target, data, usage, 0, 0)
+        }
+    })
 }
 
 #[unwind_aborts]
