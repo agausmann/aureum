@@ -37,7 +37,7 @@
 
 use std::borrow::Cow;
 use std::cell::{Ref, RefCell};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::ffi::{CStr, CString};
 use std::os::raw::*;
 use std::rc::Rc;
@@ -265,6 +265,7 @@ impl Context {
                 transform_feedbacks: ObjectMap::new(),
                 vertex_arrays: ObjectMap::new(),
                 uniforms: UniformMap::new(),
+                client_buffers: HashMap::new(),
             })),
         }
     }
@@ -338,6 +339,47 @@ struct ContextInner {
 
     /// Maps integer keys to per-program JS uniform locations.
     uniforms: UniformMap,
+
+    /// Buffers to be used internally, for holding client-side buffer data.
+    client_buffers: HashMap<GLenum, WebGLBuffer>,
+}
+
+impl ContextInner {
+    fn with_buffer<F, R>(
+        &mut self,
+        binding: GLenum,
+        target: GLenum,
+        buf_size: GLsizei,
+        ptr: *const c_void,
+        func: F,
+    ) -> R
+    where
+        F: FnOnce(&mut ContextInner, webgl::GLintptr) -> R,
+    {
+        if self.webgl.get_parameter(binding).is_null() {
+            let data = user_bytes(buf_size, ptr);
+
+            // fools the borrow checker into accepting this. Otherwise, the closure will attempt
+            // to capture `self` entirely and will fail to compile.
+            let webgl = &mut self.webgl;
+            let buffer = self.client_buffers.entry(target).or_insert_with(|| {
+                webgl
+                    .create_buffer()
+                    .expect("unable to create client buffer")
+            });
+
+            self.webgl.bind_buffer(target, Some(buffer));
+            self.webgl
+                .buffer_data_2(target, data, gl::DYNAMIC_DRAW, 0, 0);
+
+            let result = func(self, 0);
+
+            self.webgl.bind_buffer(target, None);
+            result
+        } else {
+            func(self, ptr as webgl::GLintptr)
+        }
+    }
 }
 
 /// A mapping from integer keys to arbitrary object types. Used to maintain and query a mapping
@@ -643,6 +685,12 @@ where
 /// containing the data in the buffer.
 fn user_bytes<'a>(size: GLsizei, data: *const c_void) -> &'a [u8] {
     user_array(size, data as *const _)
+}
+
+/// Interprets the given void pointer as a mutable byte buffer with `size` bytes, returning a slice
+/// into the data in the buffer.
+fn user_bytes_mut<'a>(size: GLsizei, data: *mut c_void) -> &'a mut [u8] {
+    user_array_mut(size, data as *mut _)
 }
 
 /// Interprets the given pointer as a clear value for the given type, per the documentation of
@@ -978,6 +1026,106 @@ fn cache_string(value: Value) -> *const GLubyte {
     } else {
         ptr::null()
     }
+}
+
+/// Calculates the number of bytes in an element index buffer according to section 2.9.3, given the
+/// number of indices and the index type.
+fn element_buffer_size(count: GLsizei, type_: GLenum) -> GLsizei {
+    let bytes_per_element = match type_ {
+        gl::UNSIGNED_BYTE => mem::size_of::<GLubyte>(),
+        gl::UNSIGNED_SHORT => mem::size_of::<GLushort>(),
+        gl::UNSIGNED_INT => mem::size_of::<GLuint>(),
+        _ => 0,
+    };
+    bytes_per_element as GLsizei * count
+}
+
+fn pixel_buffer_size(pixel_count: GLsizei, format: GLenum, type_: GLenum) -> GLsizei {
+    // Adapted from Table 3.3
+    let bytes_per_pixel = match (format, type_) {
+        (gl::RGBA, gl::UNSIGNED_BYTE) => 4,
+        (gl::RGBA, gl::BYTE) => 4,
+        (gl::RGBA, gl::UNSIGNED_SHORT_4_4_4_4) => 2,
+        (gl::RGBA, gl::UNSIGNED_SHORT_5_5_5_1) => 2,
+        (gl::RGBA, gl::UNSIGNED_INT_2_10_10_10_REV) => 4,
+        (gl::RGBA, gl::HALF_FLOAT) => 8,
+        (gl::RGBA, gl::FLOAT) => 16,
+        (gl::RGBA_INTEGER, gl::UNSIGNED_BYTE) => 4,
+        (gl::RGBA_INTEGER, gl::BYTE) => 4,
+        (gl::RGBA_INTEGER, gl::UNSIGNED_SHORT) => 8,
+        (gl::RGBA_INTEGER, gl::SHORT) => 8,
+        (gl::RGBA_INTEGER, gl::UNSIGNED_INT) => 16,
+        (gl::RGBA_INTEGER, gl::INT) => 16,
+        (gl::RGBA_INTEGER, gl::UNSIGNED_INT_2_10_10_10_REV) => 4,
+        (gl::RGB, gl::UNSIGNED_BYTE) => 3,
+        (gl::RGB, gl::BYTE) => 3,
+        (gl::RGB, gl::UNSIGNED_SHORT_5_6_5) => 2,
+        (gl::RGB, gl::UNSIGNED_INT_10F_11F_11F_REV) => 4,
+        (gl::RGB, gl::UNSIGNED_INT_5_9_9_9_REV) => 4,
+        (gl::RGB, gl::HALF_FLOAT) => 6,
+        (gl::RGB, gl::FLOAT) => 12,
+        (gl::RGB_INTEGER, gl::UNSIGNED_BYTE) => 3,
+        (gl::RGB_INTEGER, gl::BYTE) => 3,
+        (gl::RGB_INTEGER, gl::UNSIGNED_SHORT) => 6,
+        (gl::RGB_INTEGER, gl::SHORT) => 6,
+        (gl::RGB_INTEGER, gl::UNSIGNED_INT) => 12,
+        (gl::RGB_INTEGER, gl::INT) => 12,
+        (gl::RG, gl::UNSIGNED_BYTE) => 2,
+        (gl::RG, gl::BYTE) => 2,
+        (gl::RG, gl::HALF_FLOAT) => 4,
+        (gl::RG, gl::FLOAT) => 8,
+        (gl::RG_INTEGER, gl::UNSIGNED_BYTE) => 2,
+        (gl::RG_INTEGER, gl::BYTE) => 2,
+        (gl::RG_INTEGER, gl::UNSIGNED_SHORT) => 4,
+        (gl::RG_INTEGER, gl::SHORT) => 4,
+        (gl::RG_INTEGER, gl::UNSIGNED_INT) => 8,
+        (gl::RG_INTEGER, gl::INT) => 8,
+        (gl::RED, gl::UNSIGNED_BYTE) => 1,
+        (gl::RED, gl::BYTE) => 1,
+        (gl::RED, gl::HALF_FLOAT) => 2,
+        (gl::RED, gl::FLOAT) => 4,
+        (gl::RED_INTEGER, gl::UNSIGNED_BYTE) => 1,
+        (gl::RED_INTEGER, gl::BYTE) => 1,
+        (gl::RED_INTEGER, gl::UNSIGNED_SHORT) => 2,
+        (gl::RED_INTEGER, gl::SHORT) => 2,
+        (gl::RED_INTEGER, gl::UNSIGNED_INT) => 4,
+        (gl::RED_INTEGER, gl::INT) => 4,
+        (gl::DEPTH_COMPONENT, gl::UNSIGNED_SHORT) => 2,
+        (gl::DEPTH_COMPONENT, gl::UNSIGNED_INT) => 4,
+        (gl::DEPTH_COMPONENT, gl::FLOAT) => 4,
+        (gl::DEPTH_STENCIL, gl::UNSIGNED_INT_24_8) => 4,
+        (gl::DEPTH_STENCIL, gl::FLOAT_32_UNSIGNED_INT_24_8_REV) => 8,
+        //XXX `gl` doesn't have any codes relating to luminance?
+        // (gl::LUMINANCE_ALPHA, gl::UNSIGNED_BYTE) => 2,
+        // (gl::LUMINANCE, gl::UNSIGNED_BYTE) => 1,
+        (gl::ALPHA, gl::UNSIGNED_BYTE) => 1,
+        _ => 0,
+    };
+    pixel_count * bytes_per_pixel
+}
+
+/// Interprets the given pointer as a pixel buffer, with the given pixel count, format and type,
+/// according to section 3.7, returning a slice into the buffer.
+fn pixel_buffer<'a>(
+    pixel_count: GLsizei,
+    format: GLenum,
+    type_: GLenum,
+    pixels: *const c_void,
+) -> &'a [u8] {
+    let buf_size = pixel_buffer_size(pixel_count, format, type_);
+    user_bytes(buf_size, pixels)
+}
+
+/// Interprets the given pointer as a pixel buffer with the given pixel count, format and type,
+/// according to section 3.7, returning a mutable slice into the buffer.
+fn pixel_buffer_mut<'a>(
+    pixel_count: GLsizei,
+    format: GLenum,
+    type_: GLenum,
+    pixels: *mut c_void,
+) -> &'a mut [u8] {
+    let buf_size = pixel_buffer_size(pixel_count, format, type_);
+    user_bytes_mut(buf_size, pixels)
 }
 
 /// Returns a pointer to a function given its name, or a null pointer if the named function is not
@@ -1906,13 +2054,13 @@ extern "system" fn draw_elements(
     indices: *const c_void,
 ) -> () {
     with_context(|cx| {
-        let buffer = cx.webgl.get_parameter(gl::ELEMENT_ARRAY_BUFFER_BINDING);
-        if buffer.is_null() {
-            unimplemented!("client-side buffers are not fully supported");
-        } else {
-            cx.webgl
-                .draw_elements(mode, count, type_, indices as webgl::GLintptr);
-        }
+        cx.with_buffer(
+            gl::ELEMENT_ARRAY_BUFFER_BINDING,
+            gl::ELEMENT_ARRAY_BUFFER,
+            element_buffer_size(count, type_),
+            indices,
+            |cx, offset| cx.webgl.draw_elements(mode, count, type_, offset),
+        )
     })
 }
 
@@ -1925,18 +2073,16 @@ extern "system" fn draw_elements_instanced(
     instancecount: GLsizei,
 ) -> () {
     with_context(|cx| {
-        let buffer = cx.webgl.get_parameter(gl::ELEMENT_ARRAY_BUFFER_BINDING);
-        if buffer.is_null() {
-            unimplemented!("client-side buffers are not fully supported");
-        } else {
-            cx.webgl.draw_elements_instanced(
-                mode,
-                count,
-                type_,
-                indices as webgl::GLintptr,
-                instancecount,
-            );
-        }
+        cx.with_buffer(
+            gl::ELEMENT_ARRAY_BUFFER_BINDING,
+            gl::ELEMENT_ARRAY_BUFFER,
+            element_buffer_size(count, type_),
+            indices,
+            |cx, offset| {
+                cx.webgl
+                    .draw_elements_instanced(mode, count, type_, offset, instancecount)
+            },
+        )
     })
 }
 
@@ -1950,19 +2096,16 @@ extern "system" fn draw_range_elements(
     indices: *const c_void,
 ) -> () {
     with_context(|cx| {
-        let buffer = cx.webgl.get_parameter(gl::ELEMENT_ARRAY_BUFFER_BINDING);
-        if buffer.is_null() {
-            unimplemented!("client-side buffers are not fully supported");
-        } else {
-            cx.webgl.draw_range_elements(
-                mode,
-                start,
-                end,
-                count,
-                type_,
-                indices as webgl::GLintptr,
-            );
-        }
+        cx.with_buffer(
+            gl::ELEMENT_ARRAY_BUFFER_BINDING,
+            gl::ELEMENT_ARRAY_BUFFER,
+            element_buffer_size(count, type_),
+            indices,
+            |cx, offset| {
+                cx.webgl
+                    .draw_range_elements(mode, start, end, count, type_, offset)
+            },
+        )
     })
 }
 
@@ -2984,7 +3127,10 @@ extern "system" fn read_pixels(
     with_context(|cx| {
         let buffer = cx.webgl.get_parameter(gl::PIXEL_PACK_BUFFER_BINDING);
         if buffer.is_null() {
-            unimplemented!("client-side buffers are not fully supported");
+            let pixels = pixel_buffer_mut(width * height, format, type_, pixels);
+
+            cx.webgl
+                .read_pixels_2(x, y, width, height, format, type_, &*pixels, 0)
         } else {
             cx.webgl.read_pixels_1(
                 x,
@@ -2994,7 +3140,7 @@ extern "system" fn read_pixels(
                 format,
                 type_,
                 pixels as webgl::GLintptr,
-            );
+            )
         }
     })
 }
@@ -3180,7 +3326,20 @@ extern "system" fn tex_image2_d(
     with_context(|cx| {
         let buffer = cx.webgl.get_parameter(gl::PIXEL_UNPACK_BUFFER_BINDING);
         if buffer.is_null() {
-            unimplemented!("client-side buffers are not fully supported");
+            let pixels = pixel_buffer(width * height, format, type_, pixels);
+
+            cx.webgl.tex_image2_d_4(
+                target,
+                level,
+                internalformat,
+                width,
+                height,
+                border,
+                format,
+                type_,
+                pixels,
+                0,
+            )
         } else {
             cx.webgl.tex_image2_d_2(
                 target,
@@ -3192,7 +3351,7 @@ extern "system" fn tex_image2_d(
                 format,
                 type_,
                 pixels as webgl::GLintptr,
-            );
+            )
         }
     })
 }
@@ -3213,7 +3372,21 @@ extern "system" fn tex_image3_d(
     with_context(|cx| {
         let buffer = cx.webgl.get_parameter(gl::PIXEL_UNPACK_BUFFER_BINDING);
         if buffer.is_null() {
-            unimplemented!("client-side buffers are not fully supported");
+            let pixels = pixel_buffer(width * height * depth, format, type_, pixels);
+
+            cx.webgl.tex_image3_d_3(
+                target,
+                level,
+                internalformat,
+                width,
+                height,
+                depth,
+                border,
+                format,
+                type_,
+                pixels,
+                0,
+            )
         } else {
             cx.webgl.tex_image3_d(
                 target,
@@ -3226,7 +3399,7 @@ extern "system" fn tex_image3_d(
                 format,
                 type_,
                 pixels as webgl::GLintptr,
-            );
+            )
         }
     })
 }
@@ -3297,7 +3470,11 @@ extern "system" fn tex_sub_image2_d(
     with_context(|cx| {
         let buffer = cx.webgl.get_parameter(gl::PIXEL_UNPACK_BUFFER_BINDING);
         if buffer.is_null() {
-            unimplemented!("client-side buffers are not fully supported");
+            let pixels = pixel_buffer(width * height, format, type_, pixels);
+
+            cx.webgl.tex_sub_image2_d_4(
+                target, level, xoffset, yoffset, width, height, format, type_, pixels, 0,
+            )
         } else {
             cx.webgl.tex_sub_image2_d_2(
                 target,
@@ -3309,7 +3486,7 @@ extern "system" fn tex_sub_image2_d(
                 format,
                 type_,
                 pixels as webgl::GLintptr,
-            );
+            )
         }
     })
 }
@@ -3331,7 +3508,22 @@ extern "system" fn tex_sub_image3_d(
     with_context(|cx| {
         let buffer = cx.webgl.get_parameter(gl::PIXEL_UNPACK_BUFFER_BINDING);
         if buffer.is_null() {
-            unimplemented!("client-side buffers are not fully supported");
+            let pixels = pixel_buffer(width * height * depth, format, type_, pixels);
+
+            cx.webgl.tex_sub_image3_d_2(
+                target,
+                level,
+                xoffset,
+                yoffset,
+                zoffset,
+                width,
+                height,
+                depth,
+                format,
+                type_,
+                Some(pixels),
+                0,
+            )
         } else {
             cx.webgl.tex_sub_image3_d(
                 target,
@@ -3345,7 +3537,7 @@ extern "system" fn tex_sub_image3_d(
                 format,
                 type_,
                 pixels as webgl::GLintptr,
-            );
+            )
         }
     })
 }
