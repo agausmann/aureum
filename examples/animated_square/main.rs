@@ -119,7 +119,7 @@ fn main() {
         current_scale,
         previous_time,
     });
-    animate_scene(0.0, Box::leak(user_data));
+    animate_scene(0.0, Box::into_raw(user_data));
 }
 
 fn build_shader_program(shader_set: &[(GLenum, &[u8])]) -> GLuint {
