@@ -1,3 +1,5 @@
 # aureum
 
-A standalone graphics library for WASM that is mostly compatible with OpenGL ES.
+Translate OpenGL ES calls to WebGL
+
+This project is no longer maintained; I recommend using [glow](https://crates.io/crates/glow) instead.
